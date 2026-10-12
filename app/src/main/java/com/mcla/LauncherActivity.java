@@ -68,11 +68,15 @@ import java.util.zip.ZipInputStream;
  */
 public class LauncherActivity extends Activity {
 
-    private static final String TAG = "LibertyLauncher";
+    private static final String TAG = "MclaLauncher";
     private static final int REQUEST_DRIVER_ZIP = 1;
+    private static final int REQUEST_GAME_DIR = 2;
     private static final String GAME_PROCESS_SUFFIX = ":game";
     /** Largest driver package accepted, unpacked. */
     private static final long MAX_DRIVER_BYTES = 256L * 1024 * 1024;
+
+    private static final String PREFS_NAME = "mcla_settings";
+    private static final String PREF_GAME_DIR = "game_dir";
 
     /** Requests for the four installation sources: REQUEST_SOURCE + row index. */
     private static final int REQUEST_SOURCE = 10;
@@ -203,6 +207,7 @@ public class LauncherActivity extends Activity {
 
     private TextView mStatus;
     private TextView mLastLaunch;
+    private TextView mGameDirLabel;
 
     private View buildLayout() {
         int pad = dp(20);
@@ -261,6 +266,16 @@ public class LauncherActivity extends Activity {
         LinearLayout.LayoutParams debugParams = new LinearLayout.LayoutParams(dp(260), dp(44));
         debugParams.topMargin = dp(10);
         left.addView(debugPlay, debugParams);
+
+        Button setGameDir = button("Set Game Directory", false);
+        setGameDir.setOnClickListener(v -> pickGameDirectory());
+        LinearLayout.LayoutParams gameDirParams = new LinearLayout.LayoutParams(dp(260), dp(44));
+        gameDirParams.topMargin = dp(10);
+        left.addView(setGameDir, gameDirParams);
+
+        mGameDirLabel = text(gameDirSummary(), 11, R.color.picker_muted);
+        mGameDirLabel.setGravity(Gravity.CENTER);
+        left.addView(mGameDirLabel, matchWrap(dp(4)));
 
         Button perfTest = button("Performance test settings", false);
         perfTest.setOnClickListener(v -> showPerformanceTestSettings());
@@ -457,7 +472,7 @@ public class LauncherActivity extends Activity {
         if (text.length() > 100000) text = text.substring(0, 100000) + "\n... (truncated)";
         Intent send = new Intent(Intent.ACTION_SEND);
         send.setType("text/plain");
-        send.putExtra(Intent.EXTRA_SUBJECT, "Liberty Recompiled crash report: " + mCrash.headline);
+        send.putExtra(Intent.EXTRA_SUBJECT, "Midnight Club: LA Recompiled crash report: " + mCrash.headline);
         send.putExtra(Intent.EXTRA_TEXT, text);
         try {
             startActivity(Intent.createChooser(send, "Share crash report"));
@@ -680,8 +695,8 @@ public class LauncherActivity extends Activity {
         if (!Installer.hasFileAccess(this)) {
             new AlertDialog.Builder(this)
                     .setTitle("Allow file access")
-                    .setMessage("To read the game files from anywhere on this device, Liberty "
-                            + "Recompiled needs access to all files. Android opens the setting "
+                    .setMessage("To read the game files from anywhere on this device, Midnight Club: LA Recompiled "
+                            + "needs access to all files. Android opens the setting "
                             + "next; enable it and come back.\n\nWithout it, copy the files into "
                             + "Android/data/" + getPackageName() + "/files/install/ instead.")
                     .setPositiveButton("Open setting", (d, w) -> Installer.requestFileAccess(this, 2))
@@ -886,10 +901,50 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    @SuppressWarnings("deprecation")
+    private void pickGameDirectory() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        try {
+            startActivityForResult(intent, REQUEST_GAME_DIR);
+        } catch (Exception e) {
+            toast("No folder picker is available on this device.");
+        }
+    }
+
+    private String gameDirSummary() {
+        String saved = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_GAME_DIR, null);
+        return saved != null ? "Game dir: " + saved : "Game dir: default (app data)";
+    }
+
+    String savedGameDir() {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_GAME_DIR, null);
+    }
+
     @Override
     @SuppressWarnings("deprecation")
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_GAME_DIR) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri treeUri = data.getData();
+                // Persist read permission across reboots
+                getContentResolver().takePersistableUriPermission(treeUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                // Resolve to a real filesystem path when possible
+                String path = Installer.pathFromUri(this, treeUri);
+                if (path == null) {
+                    // Fall back to the URI string itself so the engine can still try
+                    path = treeUri.toString();
+                }
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                        .putString(PREF_GAME_DIR, path).apply();
+                if (mGameDirLabel != null) mGameDirLabel.setText(gameDirSummary());
+                toast("Game directory set to: " + path);
+            }
+            return;
+        }
         if (requestCode >= REQUEST_SOURCE && requestCode < REQUEST_SOURCE + SOURCE_LABELS.length) {
             if (resultCode == RESULT_OK && data != null) {
                 onSourcePicked(requestCode - REQUEST_SOURCE, data.getData());
@@ -1194,6 +1249,8 @@ public class LauncherActivity extends Activity {
                 setBusy(false, null);
                 Intent intent = new Intent(this, MclaActivity.class);
                 if (debugLog) intent.putExtra(MclaActivity.EXTRA_DEBUG_LOG, true);
+                String gameDir = savedGameDir();
+                if (gameDir != null) intent.putExtra("mcla_game_dir", gameDir);
                 android.content.SharedPreferences perf = perfTestPreferences();
                 intent.putExtra(MclaActivity.EXTRA_SHADOWS_OFF, perf.getBoolean(PERF_SHADOWS_OFF, false));
                 intent.putExtra(MclaActivity.EXTRA_HALF_DRAW_DISTANCE,

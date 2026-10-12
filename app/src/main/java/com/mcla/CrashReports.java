@@ -33,7 +33,7 @@ import java.util.Locale;
  */
 final class CrashReports {
 
-    private static final String TAG = "LibertyCrash";
+    private static final String TAG = "MclaCrash";
     private static final String PREFS = "crash_reports";
     private static final String SEEN = "seen_until";
     private static final String DISMISSED = "dismissed";
@@ -176,7 +176,7 @@ final class CrashReports {
             summary += " (status " + exit.getStatus() + ")";
         }
 
-        text.append("Liberty Recompiled for Android - crash report\n");
+        text.append("Midnight Club: LA Recompiled for Android - crash report\n");
         text.append("summary: ").append(summary).append('\n');
         text.append("time: ").append(new Date(exit.getTimestamp())).append('\n');
         text.append("process: ").append(exit.getProcessName()).append(" pid ").append(exit.getPid())

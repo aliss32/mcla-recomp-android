@@ -25,9 +25,41 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
   if (!paths.game_data_root.empty()) {
     return;
   }
+
+  // 1. Check custom path passed via environment variable (set by Android launcher)
+  const char* env_dir = std::getenv("MCLA_GAME_DIR");
+  if (env_dir && *env_dir) {
+    std::error_code error;
+    std::filesystem::path p(env_dir);
+    if (std::filesystem::exists(p / "default.xex", error) || std::filesystem::exists(p, error)) {
+      paths.game_data_root = p;
+      return;
+    }
+  }
+
+  // 2. Check Android XDG data directory paths
+  const char* xdg = std::getenv("XDG_DATA_HOME");
+  if (xdg && *xdg) {
+    std::error_code error;
+    std::filesystem::path xdg_base(xdg);
+    if (std::filesystem::exists(xdg_base / "MclaRecomp" / "game" / "default.xex", error)) {
+      paths.game_data_root = xdg_base / "MclaRecomp" / "game";
+      return;
+    }
+    if (std::filesystem::exists(xdg_base / "game" / "default.xex", error)) {
+      paths.game_data_root = xdg_base / "game";
+      return;
+    }
+  }
+
+  // 3. Fallback to executable folder and parents
   std::filesystem::path folder = rex::filesystem::GetExecutableFolder();
   for (int level = 0; level < 5 && !folder.empty(); ++level) {
     std::error_code error;
+    if (std::filesystem::exists(folder / "MclaRecomp" / "game" / "default.xex", error)) {
+      paths.game_data_root = folder / "MclaRecomp" / "game";
+      return;
+    }
     if (std::filesystem::exists(folder / "game" / "default.xex", error)) {
       paths.game_data_root = folder / "game";
       return;

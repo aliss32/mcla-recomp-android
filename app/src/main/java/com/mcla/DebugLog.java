@@ -24,7 +24,7 @@ import java.util.Locale;
  */
 final class DebugLog {
 
-    private static final String TAG = "LibertyDebugLog";
+    private static final String TAG = "MclaDebugLog";
     static final String DIRECTORY = "debug_logs";
     private static final int KEEP = 5;
     /** logcat -r is in kilobytes; with -n 1 at most twice this on disk. */

@@ -28,7 +28,7 @@ import java.io.File;
  */
 final class Installer {
 
-    private static final String TAG = "LibertyInstall";
+    private static final String TAG = "MclaInstall";
 
     /** A base-game source check: whether it is supported and what was found. */
     static final class Inspection {

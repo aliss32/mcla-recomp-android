@@ -121,7 +121,7 @@ public class MclaActivity extends SDLActivity {
             version = info.versionName + " (" + info.versionCode + ")";
         } catch (Exception ignored) {
         }
-        report.append("Liberty Recompiled for Android ").append(version).append('\n');
+        report.append("Midnight Club: LA Recompiled for Android ").append(version).append('\n');
         report.append("time: ").append(new java.util.Date()).append('\n');
         report.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                 .append(" (").append(Build.DEVICE).append(", board ").append(Build.BOARD)
@@ -236,6 +236,15 @@ public class MclaActivity extends SDLActivity {
         setenv("XDG_DATA_HOME", dataRoot.getAbsolutePath());
         setenv("HOME", dataRoot.getAbsolutePath());
         setenv("REX_RESOURCES_DIR", resources.getAbsolutePath());
+        // If the user pointed to a custom game directory in the launcher, honour it.
+        Intent launchIntent = getIntent();
+        if (launchIntent != null) {
+            String customGameDir = launchIntent.getStringExtra("mcla_game_dir");
+            if (customGameDir != null && !customGameDir.isEmpty()) {
+                setenv("MCLA_GAME_DIR", customGameDir);
+                Log.i(TAG, "Custom game dir: " + customGameDir);
+            }
+        }
         // Turnip's GMEM (tiled) mode loses ~15% on this renderer's many small
         // passes and resolves; direct system-memory rendering is faster on the
         // Adreno 650. env.txt may override it.
