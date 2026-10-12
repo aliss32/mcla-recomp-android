@@ -16,7 +16,7 @@ if [ -z "${ANDROID_HOME:-}" ]; then
 fi
 export ANDROID_HOME
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
-export NDK_VER="${NDK_VER:-26.3.11579264}"
+export NDK_VER="${NDK_VER:-27.2.12479018}"
 export ANDROID_NDK="${ANDROID_NDK:-$ANDROID_HOME/ndk/$NDK_VER}"
 export JAVA_HOME="${JAVA_HOME:-/c/Program Files/Android/Android Studio/jbr}"
 
