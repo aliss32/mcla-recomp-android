@@ -46,9 +46,8 @@ index d876846..500ee36 100644
  
 -#ifdef __APPLE__
 -// Apple libc++ does not expose clock_time_conversion or clock_cast.
-+#if defined(__APPLE__) || defined(__PROSPERO__) || defined(__FreeBSD__)
-+// Apple libc++ does not expose clock_time_conversion or clock_cast, and
-+// neither does the libc++ shipped with the PS5 payload SDK.
++#if defined(__APPLE__) || defined(__PROSPERO__) || defined(__FreeBSD__) || defined(__ANDROID__)
++// Apple libc++, PS5, and Android NDK libc++ do not expose clock_time_conversion or clock_cast.
  template <class, class>
  struct clock_time_conversion {};
  
@@ -493,6 +492,8 @@ index 1ddafd0..3e873dc 100644
  
  if(APPLE)
      target_link_libraries(rexcore PRIVATE pthread)
+++elseif(ANDROID)
++    target_link_libraries(rexcore PRIVATE dl log)
 +elseif(PS5)
 +    # No librt or libdl: threads and timers come from the SDK's libc/libkernel.
  elseif(UNIX)
@@ -2369,6 +2370,8 @@ index 5bd3dc5..5e450f4 100644
 +elseif(PS5)
 +    # No window system surface; presentation is VK_KHR_display.
 +    set(REXUI_PLATFORM_SOURCES)
++elseif(ANDROID)
++    set(REXUI_PLATFORM_SOURCES)
  else()
      set(REXUI_PLATFORM_SOURCES
          surface_gnulinux.cpp
@@ -2377,9 +2380,8 @@ index 5bd3dc5..5e450f4 100644
  
  # Platform-specific dependencies
 -if(UNIX AND NOT APPLE)
-+# PS5 has no X11 or Wayland; presentation goes through the Vulkan driver's
-+# VK_KHR_display on VideoOut.
-+if(UNIX AND NOT APPLE AND NOT PS5)
++# PS5 and Android have no X11 or Wayland.
++if(UNIX AND NOT APPLE AND NOT PS5 AND NOT ANDROID)
      find_package(PkgConfig REQUIRED)
      pkg_check_modules(X11_XCB REQUIRED x11-xcb)
      # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every
