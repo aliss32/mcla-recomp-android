@@ -13,6 +13,7 @@
 /dump/
 /generated/*
 !/generated/rexglue.cmake
+!/generated/default/
 
 # Keys
 *.key

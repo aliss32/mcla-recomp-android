@@ -202,25 +202,18 @@ public class MclaActivity extends SDLActivity {
         Intent intent = getIntent();
         if (intent == null || !intent.hasExtra(EXTRA_SHADOWS_OFF)) return;
         boolean shadowsOff = intent.getBooleanExtra(EXTRA_SHADOWS_OFF, false);
-        // 0 = off.
-        int water = Math.max(0, Math.min(intent.getIntExtra(EXTRA_WATER_REFLECTION_INTERVAL, 1), 3));
-        int environment =
-                Math.max(0, Math.min(intent.getIntExtra(EXTRA_OTHER_REFLECTION_INTERVAL, 1), 3));
-        arguments.removeIf(a -> a.startsWith("--gta4_native_shadow_interval")
-                || a.startsWith("--gta4_native_water_reflection_interval")
-                || a.startsWith("--gta4_native_environment_reflection_interval"));
-        arguments.add("--gta4_native_shadow_interval=" + (shadowsOff ? 0 : 1));
+        arguments.removeIf(a -> a.startsWith("--mcla_shadows")
+                || a.startsWith("--mcla_race_shadows")
+                || a.startsWith("--mcla_fast_car_shadows"));
+        arguments.add("--mcla_shadows=" + (!shadowsOff));
         arguments.removeIf(a -> a.startsWith("--android_gpu_turbo"));
         arguments.add("--android_gpu_turbo=" + intent.getBooleanExtra(EXTRA_GPU_TURBO, false));
         if (intent.getBooleanExtra(EXTRA_HALF_DRAW_DISTANCE, false)) {
-            // Fixed: the dynamic controller would lower it further.
-            arguments.removeIf(a -> a.startsWith("--gta4_draw_distance_scale")
-                    || a.startsWith("--gta4_dynamic_draw_distance="));
-            arguments.add("--gta4_draw_distance_scale=0.5");
-            arguments.add("--gta4_dynamic_draw_distance=false");
+            arguments.removeIf(a -> a.startsWith("--mcla_city_lod")
+                    || a.startsWith("--mcla_traffic_lod"));
+            arguments.add("--mcla_city_lod=0.5");
+            arguments.add("--mcla_traffic_lod=0.5");
         }
-        arguments.add("--gta4_native_water_reflection_interval=" + water);
-        arguments.add("--gta4_native_environment_reflection_interval=" + environment);
     }
 
     private void prepareEnvironment() {
@@ -482,10 +475,6 @@ public class MclaActivity extends SDLActivity {
      * Only the exact old line is rewritten; edited values are left alone.
      */
     private static final String[][] ARGUMENT_MIGRATIONS = {
-            // 0.5.7.9: dynamic draw distance floor 0.80 (0.75 broke dynamic
-            // shadows; 0.85 was an interim default of test builds).
-            {"--gta4_dynamic_draw_distance_min=0.75", "--gta4_dynamic_draw_distance_min=0.80"},
-            {"--gta4_dynamic_draw_distance_min=0.85", "--gta4_dynamic_draw_distance_min=0.80"},
     };
 
     private static void migrateArguments(File file) {
