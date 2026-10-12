@@ -74,6 +74,56 @@ def main():
         'Link dl log to rexcore on Android (no librt.so)'
     )
 
+    # 4. Numeric: Replace std::from_chars for float/double with strtof/strtod on Android (NDK libc++ lacks float from_chars)
+    numeric_h = os.path.join(sdk_dir, "include", "rex", "string", "numeric.h")
+    patch_file(
+        numeric_h,
+        '#include <charconv>',
+        '#include <charconv>\n#include <cstdlib>',
+        'Include cstdlib for strtof/strtod in numeric.h'
+    )
+    patch_file(
+        numeric_h,
+        '    auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,\n                                      std::chars_format::general);',
+        '''#if defined(__ANDROID__)
+    char* end_ptr = nullptr;
+    std::string s_val(range);
+    if constexpr (std::is_same_v<T, float>) {
+      result = std::strtof(s_val.c_str(), &end_ptr);
+    } else {
+      result = std::strtod(s_val.c_str(), &end_ptr);
+    }
+    if (end_ptr == s_val.c_str()) {
+      return T();
+    }
+#else
+    auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
+                                      std::chars_format::general);
+#endif''',
+        'Use strtof/strtod for float/double from_chars in numeric.h'
+    )
+    patch_file(
+        numeric_h,
+        '      auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);\n      if (result.ec != std::errc()) {\n        assert_always();\n        return vec128_t();\n      }\n      p = result.ptr;',
+        '''#if defined(__ANDROID__)
+      char* next_p = nullptr;
+      v.f32[i] = std::strtof(p, &next_p);
+      if (next_p == p) {
+        assert_always();
+        return vec128_t();
+      }
+      p = next_p;
+#else
+      auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
+      if (result.ec != std::errc()) {
+        assert_always();
+        return vec128_t();
+      }
+      p = result.ptr;
+#endif''',
+        'Use strtof for vec128_t from_chars in numeric.h'
+    )
+
     print("Android patching completed.")
 
 if __name__ == "__main__":
