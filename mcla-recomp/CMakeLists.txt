@@ -42,4 +42,4 @@ else()
     add_executable(mcla ${MCLA_SOURCES})
 endif()
 
-rexglue_setup_target(mcla)
+rexglue_setup_target(mcla GPU_PLUGINS xenos)
