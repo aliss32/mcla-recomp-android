@@ -33,15 +33,22 @@ Bu proje, [mcla-recomp](https://github.com/holdmysocks/mcla-recomp) ve [LibertyR
 
 ## GitHub Üzerinde Derleme Adımları
 
-1. Bu klasörün içeriğini yeni bir GitHub deposuna yükleyin:
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit for MCLA Android Port with Vulkan & Turnip support"
-   git branch -M main
-   git remote add origin https://github.com/KULLANICI_ADINIZ/mcla-android.git
-   git push -u origin main
-   ```
-2. GitHub deponuzun **Actions** sekmesine gidin.
+1. Proje dizinine gidin ve hazırlanan push scriptini çalıştırın:
+   * **Windows (PowerShell):**
+     ```powershell
+     cd C:\Users\aliha\.gemini\antigravity-ide\scratch\mcla-android-port\MclaAndroidPort
+     .\push_to_github.ps1
+     ```
+   * **Veya doğrudan Git komutlarıyla:**
+     ```bash
+     git init
+     git add .
+     git commit -m "feat: Initial MCLA Android port with Vulkan & Turnip driver support"
+     git branch -M main
+     git remote add origin https://github.com/aliss32/mcla-recomp-android.git
+     git push -u origin main
+     ```
+2. GitHub deponuzun **Actions** sekmesine gidin:
+   * URL: `https://github.com/aliss32/mcla-recomp-android/actions`
 3. `Build MCLA Android APK (Vulkan & Turnip Driver Support)` iş akışını çalıştırın (veya push sonrası otomatik çalışacaktır).
 4. Derleme tamamlandığında **Artifacts** bölümünden derlenen APK dosyasını indirebilirsiniz.
