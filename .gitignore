@@ -23,3 +23,6 @@ logs/
 # The root .gitignore drops every jar (and every scripts/ directory, which is
 # why scripts/ was added with --force).
 !gradle/wrapper/gradle-wrapper.jar
+
+# Push scripts
+push_to_github.*

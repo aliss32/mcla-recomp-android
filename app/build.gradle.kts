@@ -13,7 +13,7 @@ plugins {
     id("com.android.application")
 }
 
-val sdlJavaDir = rootProject.file("app/src/main/sdl_java")
+val sdlJavaDir = file("src/main/sdl_java")
 
 android {
     namespace   = "com.mcla"
