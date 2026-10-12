@@ -84,9 +84,10 @@ If you used *mcla-recomp* to extract the ISO, the layout should be:
 
 ---
 
-## Repository
+## Repositories
 
 `https://github.com/aliss32/mcla-recomp-android`
+`https://github.com/vaduur/LibertyRecompAndroid`
 
 ---
 
