@@ -66,6 +66,8 @@ jobs:
           git submodule update --init --recursive
           git apply $GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-v0.10.0-mcla.patch
           git apply $GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-minmax-blend-factor.patch
+          git apply $GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-skip-x11-android.patch || \
+            sed -i 's/if(CMAKE_SYSTEM_NAME STREQUAL "Linux")/if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)/' src/ui/CMakeLists.txt
           echo "REXSDK_DIR=/tmp/rexglue-sdk" >> $GITHUB_ENV
 
       - name: Grant permissions
