@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing
+*.jks
+*.keystore
+
+# Staged by scripts/build_native.sh and scripts/build_driver_proxy.sh
+app/src/main/jniLibs/
+app/src/main/assets/Resources/
+logs/
+
+# The root .gitignore drops every jar (and every scripts/ directory, which is
+# why scripts/ was added with --force).
+!gradle/wrapper/gradle-wrapper.jar

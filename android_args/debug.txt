@@ -1,0 +1,5 @@
+# Native logs to logcat (tag LibertyRecomp). Without --diagnostics every
+# REXLOG line is suppressed.
+--diagnostics=true
+--diagnostics_categories=logging
+--log_level=info

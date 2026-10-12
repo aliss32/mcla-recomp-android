@@ -1,0 +1,11 @@
+--gta4_native_coalesce_state_commands=false
+--gta4_native_recycle_commands=false
+--gta4_native_partial_constant_snapshot=false
+--gta4_native_lazy_constant_hash=false
+--gta4_native_direct_constant_apply=false
+--gta4_native_stamped_protection=false
+--gta4_native_buffer_validation_per_frame=false
+--gta4_native_assembly_constant_bound=false
+--gta4_native_prepared_binding_cache=false
+--gta4_native_dedupe_vertex_bindings=false
+--gta4_native_partial_constant_upload=false

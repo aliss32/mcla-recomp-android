@@ -1,0 +1,57 @@
+# RP5 / Adreno 650 performance profile. Push with:
+#   bash os/android/scripts/push_args.sh os/android/android_args/perf.txt
+# Logs stay on at warn so crashes are still visible in logcat. Remove or
+# comment out BOTH diagnostics lines together: categories without
+# --diagnostics=true make the runtime refuse to start.
+#--diagnostics=true
+#--diagnostics_categories=logging
+--log_level=warn
+
+# Render below the 1080p panel and upscale with FSR 1 (EASU + RCAS sharpening)
+# instead of a bilinear stretch. "balanced" renders at 1/1.7 (~635p): on the
+# 5.5" panel it looks like the console's 720p ("quality") and keeps frame times
+# steadier in the open world.
+--gta4_native_upscaler=fsr1
+--gta4_fsr1_quality=quality
+
+# Cheaper anti-aliasing (off | fxaa | smaa)
+--gta4_native_anti_aliasing=fxaa
+
+# Below-console world detail: the render thread replays every draw, so draw
+# count is what sets the frame rate on Snapdragon 865 (stock ~5800 draws,
+# this profile ~1400-1700). Shadows were ~45% of all draws.
+--gta4_draw_distance_scale=1.0
+# Console draw distance, lowered automatically (down to 55%) only while
+# frames miss the 30 fps budget.
+--gta4_dynamic_draw_distance=true
+--gta4_dynamic_draw_distance_min=0.80
+--gta4_shadow_map_base_size=256
+--gta4_shadow_distance_scale=0.5
+--gta4_reflection_resolution=original
+--gta4_reflection_capture_distance=near
+# 4x MSAA on the low-resolution water/mirror captures is invisible but costs
+# resolves and bandwidth on the tiler.
+--gta4_reflection_aa=off
+# Do NOT lower: the patched quality-table field is not the cascade count, and
+# any value below stock removes ped/vehicle shadows and makes tree shadows flicker.
+#--gta4_shadow_cascade_count=2
+
+# A steady 30 is better on a handheld than an uneven 40-60 (0 | 30 | 40 | 60 | 120)
+--gta4_frame_limit=30
+
+# Fewer cars and pedestrians means fewer draws; the renderer thread is the
+# bottleneck on Snapdragon 865 (defaults are 1.25, above the console's 1.0).
+--gta4_traffic_density_scale=0.4
+--gta4_parked_car_density_scale=0.4
+--gta4_ped_density_scale=0.4
+--gta4_scenario_ped_density_scale=0.4
+
+# Renderer profiling scopes (on by default upstream)
+--gta4_profile_native_detailed_cpu=false
+--gta4_profile_native_detailed_gpu=false
+# Motion blur costs a full-screen composite and steadies frame times when off.
+--gta4_motion_blur=false
+# Let the title run three frames ahead so the worker, recorder and GPU overlap.
+--gta4_native_max_queued_frames=3
+# FSR renders 1/1.5 of a 720p output; the presenter scales 720p to the panel.
+--gta4_output_height_cap=720
