@@ -3,7 +3,7 @@
 # SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
-project(mcla LANGUAGES CXX)
+project(mcla LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,15 +25,21 @@ set(MCLA_SOURCES
     src/code_pointer_scan.cpp
 )
 
-if(WIN32)
+if(ANDROID)
+    add_library(mcla SHARED ${MCLA_SOURCES})
+    set_target_properties(mcla PROPERTIES OUTPUT_NAME "main")
+    target_link_libraries(mcla PRIVATE SDL3::SDL3 android log z)
+    target_link_options(mcla PRIVATE
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,--export-dynamic-symbol=SDL_main"
+        "-Wl,--export-dynamic-symbol=JNI_OnLoad"
+        "-Wl,-Bsymbolic-functions"
+    )
+elseif(WIN32)
     add_executable(mcla WIN32 ${MCLA_SOURCES})
+    target_link_libraries(mcla PRIVATE winmm)
 else()
     add_executable(mcla ${MCLA_SOURCES})
 endif()
 
 rexglue_setup_target(mcla)
-
-if(WIN32)
-    # timeBeginPeriod for the frame limiter.
-    target_link_libraries(mcla PRIVATE winmm)
-endif()
