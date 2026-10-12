@@ -16,7 +16,8 @@ captures/
 *.keystore
 
 # Staged by scripts/build_native.sh and scripts/build_driver_proxy.sh
-app/src/main/jniLibs/
+# Ignore the compiled .so files but keep the directory tracked via .gitkeep
+app/src/main/jniLibs/**/*.so
 app/src/main/assets/Resources/
 logs/
 
