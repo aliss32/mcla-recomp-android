@@ -84,6 +84,8 @@ jobs:
           ls -la app/src/main/jniLibs/arm64-v8a/
           test -f app/src/main/jniLibs/arm64-v8a/libmain.so || { echo "libmain.so missing!"; exit 1; }
           test -f app/src/main/jniLibs/arm64-v8a/libSDL3.so || { echo "libSDL3.so missing!"; exit 1; }
+          test -f app/src/main/jniLibs/arm64-v8a/librexruntime.so || { echo "librexruntime.so missing!"; exit 1; }
+          test -f app/src/main/jniLibs/arm64-v8a/librexgpu-xenos.so || { echo "librexgpu-xenos.so missing!"; exit 1; }
 
       - name: Assemble APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace

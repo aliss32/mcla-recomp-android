@@ -13,14 +13,14 @@ def patch_file(filepath, old_text, new_text, description):
         return False
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read().replace('\r\n', '\n')
-    if old_text in content:
+    if new_text in content:
+        print(f"[SKIP] Already patched {os.path.basename(filepath)}: {description}")
+        return True
+    elif old_text in content:
         content = content.replace(old_text, new_text, 1)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         print(f"[OK] Patched {os.path.basename(filepath)}: {description}")
-        return True
-    elif new_text in content:
-        print(f"[SKIP] Already patched {os.path.basename(filepath)}: {description}")
         return True
     else:
         print(f"[WARN] Target text not found in {os.path.basename(filepath)}: {description}")
@@ -68,8 +68,8 @@ def main():
     )
     patch_file(
         ui_cmake,
-        'elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")',
-        'elseif(ANDROID)\n    target_link_libraries(rexui PRIVATE android)\nelseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")',
+        'elseif(APPLE)\n    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")',
+        'elseif(APPLE)\n    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")\nelseif(ANDROID)\n    target_link_libraries(rexui PRIVATE android)',
         'Link libandroid.so to rexui'
     )
 
@@ -91,85 +91,25 @@ def main():
         'Link dl log to rexcore on Android (no librt.so)'
     )
 
-    # 4. Numeric: Replace std::from_chars for float/double with strtof/strtod on Android (NDK libc++ lacks float from_chars)
+    # 4. Numeric: Add Android to portable_float_from_chars preprocessor guard
+    #    Android NDK libc++ lacks float std::from_chars. The SDK already has a
+    #    portable_float_from_chars fallback used for Mac/PS5; we just add Android
+    #    to that same preprocessor condition (4 occurrences in numeric.h).
     numeric_h = os.path.join(sdk_dir, "include", "rex", "string", "numeric.h")
-    patch_file(
-        numeric_h,
-        '#include <charconv>',
-        '#include <charconv>\n#include <cstdlib>',
-        'Include cstdlib for strtof/strtod in numeric.h'
-    )
-
-    # Patch detail::fpfs float/double parser (entire else block including error check)
-    pattern_fpfs = (
-        r'(\s+)auto \[p, error\] = std::from_chars\(range\.data\(\), range\.data\(\) \+ range\.size\(\), result,\n'
-        r'\s+std::chars_format::general\);\n'
-        r'\s+//[^\n]*\n'
-        r'\s+if \(error != std::errc\(\)\) \{\n'
-        r'\s+assert_always\(\);\n'
-        r'\s+return T\(\);\n'
-        r'\s+\}\n'
-        r'\s+if \(is_negative\) \{\n'
-        r'\s+result = -result;\n'
-        r'\s+\}'
-    )
-    replacement_fpfs = (
-        r'''\1#if defined(__ANDROID__)
-\1char* end_ptr = nullptr;
-\1std::string s_val(range);
-\1if constexpr (std::is_same_v<T, float>) {
-\1  result = std::strtof(s_val.c_str(), &end_ptr);
-\1} else {
-\1  result = std::strtod(s_val.c_str(), &end_ptr);
-\1}
-\1if (end_ptr == s_val.c_str()) {
-\1  return T();
-\1}
-\1if (is_negative) {
-\1  result = -result;
-\1}
-#else
-\1auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
-\1                                  std::chars_format::general);
-\1if (error != std::errc()) {
-\1  assert_always();
-\1  return T();
-\1}
-\1if (is_negative) {
-\1  result = -result;
-\1}
-#endif'''
-    )
-    patch_file_regex(numeric_h, pattern_fpfs, replacement_fpfs, 'Use strtof/strtod in detail::fpfs on Android')
-
-    # Patch vec128_t float parser
-    pattern_vec128 = (
-        r'(\s+)auto result = std::from_chars\(p, end, v\.f32\[i\], std::chars_format::general\);\n'
-        r'\s+if \(result\.ec != std::errc\(\)\) \{\n'
-        r'\s+assert_always\(\);\n'
-        r'\s+return vec128_t\(\);\n'
-        r'\s+\}\n'
-        r'\s+p = result\.ptr;'
-    )
-    replacement_vec128 = (
-        r'''\1#if defined(__ANDROID__)
-\1char* next_p = nullptr;
-\1v.f32[i] = std::strtof(p, &next_p);
-\1if (next_p == p) {
-\1  assert_always();
-\1  return vec128_t();
-\1}
-\1p = next_p;
-#else
-\1auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
-\1if (result.ec != std::errc()) {
-\1  assert_always();
-\1  return vec128_t();
-\1}
-\1p = result.ptr;
-#endif'''
-    )
-    patch_file_regex(numeric_h, pattern_vec128, replacement_vec128, 'Use strtof in vec128_t on Android')
+    if os.path.exists(numeric_h):
+        with open(numeric_h, 'r', encoding='utf-8') as f:
+            nc = f.read().replace('\r\n', '\n')
+        old_guard = '#if REX_PLATFORM_MAC || REX_PLATFORM_PS5'
+        new_guard = '#if REX_PLATFORM_MAC || REX_PLATFORM_PS5 || defined(__ANDROID__)'
+        if new_guard in nc:
+            print(f"[SKIP] Already patched numeric.h: portable_float_from_chars guard")
+        elif old_guard in nc:
+            nc = nc.replace(old_guard, new_guard)  # replaces ALL occurrences
+            with open(numeric_h, 'w', encoding='utf-8') as f:
+                f.write(nc)
+            print(f"[OK] Patched numeric.h: Add Android to portable_float_from_chars guard (all occurrences)")
+        else:
+            print(f"[WARN] Guard not found in numeric.h")
 
     print("Android patching completed.")
 
