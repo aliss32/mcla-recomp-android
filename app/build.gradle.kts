@@ -18,7 +18,7 @@ val sdlJavaDir = file("src/main/sdl_java")
 android {
     namespace   = "com.mcla"
     compileSdk  = 35
-    ndkVersion  = "26.3.11579264"
+    ndkVersion  = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.mcla.recomp"
