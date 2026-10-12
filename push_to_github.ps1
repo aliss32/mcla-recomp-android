@@ -47,14 +47,22 @@ Write-Host "[5/5] 'main' branch'ine geçilip GitHub'a yükleniyor..." -Foregroun
 git branch -M main
 
 try {
+    Write-Host "Remote ile senkronize ediliyor..." -ForegroundColor Yellow
+    git pull origin main --rebase --allow-unrelated-histories
     git push -u origin main
     Write-Host ""
     Write-Host "BAŞARILI! Proje başarıyla https://github.com/aliss32/mcla-recomp-android adresine yüklendi." -ForegroundColor Green
     Write-Host "GitHub Actions otomatik olarak tetiklenecektir:" -ForegroundColor Cyan
     Write-Host "https://github.com/aliss32/mcla-recomp-android/actions" -ForegroundColor Cyan
 } catch {
-    Write-Host ""
-    Write-Host "DİKKAT: Push işlemi sırasında hata oluştu veya kimlik doğrulaması gerekiyor." -ForegroundColor Red
-    Write-Host "Eğer GitHub'da 'mcla-recomp-android' reposu henüz açılmadıysa önce GitHub web arayüzünden açmalısınız." -ForegroundColor Yellow
-    Write-Host "Giriş yapmak için Personal Access Token (PAT) veya SSH kullanabilirsiniz." -ForegroundColor Yellow
+    Write-Host "Normal push reddedildi, force push (üzerine yazma) deneniyor..." -ForegroundColor Yellow
+    try {
+        git push -u origin main --force
+        Write-Host ""
+        Write-Host "BAŞARILI (Force Push)! Proje başarıyla yüklendi." -ForegroundColor Green
+        Write-Host "GitHub Actions: https://github.com/aliss32/mcla-recomp-android/actions" -ForegroundColor Cyan
+    } catch {
+        Write-Host ""
+        Write-Host "DİKKAT: Push işlemi sırasında hata oluştu. Kimlik doğrulama veya yetki sorunu olabilir." -ForegroundColor Red
+    }
 }
