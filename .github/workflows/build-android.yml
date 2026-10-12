@@ -50,6 +50,12 @@ jobs:
           cp $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so \
              app/src/main/jniLibs/arm64-v8a/
 
+      - name: Sync SDL3 Java wrappers
+        run: |
+          rm -rf app/src/main/sdl_java
+          mkdir -p app/src/main/sdl_java
+          cp -r /tmp/SDL3/android-project/app/src/main/java/* app/src/main/sdl_java/
+
       - name: Grant permissions
         run: chmod +x gradlew scripts/*.sh
 
