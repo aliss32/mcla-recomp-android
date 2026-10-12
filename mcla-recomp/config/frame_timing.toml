@@ -1,0 +1,86 @@
+# Frame timing hooks. Implemented in src/frame_timing.cpp.
+#
+# The addresses and the analysis of the engine timer (sub_821BDA90, timer
+# object at 0x827D7500) come from LARecomp's TECHNICAL_NOTES.md, sections 1-3,
+# used with its author's permission. The original 60 FPS timing pipeline there
+# is credited to BadassBaboon.
+
+# 0x821BDAB0: `subf r8,r10,r11`, elapsed guest ticks since the previous frame.
+# Hooked after the instruction: clamps a runaway delta and runs the host frame
+# limiter, so the wait is part of the frame the timer then measures.
+[[midasm_hook]]
+name = "mcla_frame_delta"
+address = 0x821BDAB0
+after_instruction = true
+registers = ["r8"]
+
+# 0x821BDB58: head of the first fixed-timestep block, which overwrites the
+# measured delta with a fixed 33.3 ms. Jumping to loc_821BDC34 skips only that
+# overwrite; the accumulated-time updates before it still run.
+[[midasm_hook]]
+name = "mcla_use_real_delta"
+address = 0x821BDB58
+jump_address_on_true = 0x821BDC34
+
+# 0x821BDB90: the second fixed-timestep path, taken on every gameplay frame.
+# Hooked after `lfs f11,0x20(r3)`; f11 is replaced with the measured unscaled
+# delta at [r3+0x58] so this path publishes real time too.
+[[midasm_hook]]
+name = "mcla_fixed_step_path"
+address = 0x821BDB90
+after_instruction = true
+registers = ["r3", "f11"]
+
+# 0x82419AA0: `li r11,2`, the present interval (vblanks per present) written
+# into the swap packet. Two means 30 Hz.
+[[midasm_hook]]
+name = "mcla_present_interval"
+address = 0x82419AA0
+registers = ["r11"]
+jump_address_on_true = 0x82419AA4
+
+# --- Corrections for code that assumes 33.3 ms frames -----------------------
+# From LARecomp (credited there to BadassBaboon). Each replaces a per-frame
+# smoothing factor with its continuous-time equivalent.
+
+# 0x82320468: `addi r9,r1,0x50` in sub_82320298 (camBoomCS::Update, the
+# gameplay chase camera). f13 is the position (velocity filter) factor, which
+# the game itself halves when the frame rate is below 60.
+[[midasm_hook]]
+name = "mcla_camera_pos_smoothing"
+address = 0x82320468
+registers = ["f13"]
+
+# 0x823204F4: `li r9,0x120` in the same function. f0 is the look-at
+# (acceleration filter) factor, halved by the game in the same way.
+[[midasm_hook]]
+name = "mcla_camera_lookat_smoothing"
+address = 0x823204F4
+registers = ["f0"]
+
+# 0x82563720: `lis r11,flt_82001D14@ha` in sub_82563298. f0 is the chassis
+# ground-depth filter coefficient (0.10 per frame at 30 FPS). This is the
+# chassis roll and ground filtering behaviour.
+[[midasm_hook]]
+name = "mcla_chassis_depth_smoothing"
+address = 0x82563720
+registers = ["f0"]
+
+# --- Intro movies ------------------------------------------------------------
+# The start-up legal screens and logos are not paced by the engine timer; they
+# are held to 30 per second in mcla_present_interval (see src/frame_timing.cpp).
+
+# 0x822C2F08: jumping to 0x822C2F7C skips the intro sequence.
+[[midasm_hook]]
+name = "mcla_hook_skip_intro"
+address = 0x822C2F08
+jump_address_on_true = 0x822C2F7C
+
+# 0x821315E4: `bl sub_822E5B00` in sub_82131508, reached with r4 = -1 when the
+# legals screen object was never created (as after a skip). -1 sets bit 24 of
+# the render pass mask, which enables a pass whose stage was never prepared and
+# corrupts the frame. Every other caller passes 0xFEFFFFFF.
+[[midasm_hook]]
+name = "mcla_skip_intro_render_pass_mask"
+address = 0x821315E4
+registers = ["r4"]
