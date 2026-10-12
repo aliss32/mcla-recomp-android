@@ -8,7 +8,7 @@ JOBS="${1:-$(( $(nproc) > 3 ? $(nproc) - 2 : 1 ))}"
 
 [ -d "$ANDROID_NDK" ] || { echo "no NDK at $ANDROID_NDK"; exit 1; }
 
-CPU_FLAGS="-march=armv8.2-a -fno-emulated-tls"
+CPU_FLAGS="-march=armv8.2-a -fno-emulated-tls -fexperimental-library"
 SDL3_SRC="${SDL3_SRC:-}"
 REXSDK_DIR="${REXSDK_DIR:-/tmp/rexglue-sdk}"
 

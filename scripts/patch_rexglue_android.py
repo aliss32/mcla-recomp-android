@@ -4,6 +4,7 @@ Applies Android compatibility patches to rexglue-sdk after the upstream
 PS5/MCLA patches have been applied.
 """
 import os
+import re
 import sys
 
 def patch_file(filepath, old_text, new_text, description):
@@ -11,7 +12,7 @@ def patch_file(filepath, old_text, new_text, description):
         print(f"[WARN] File not found: {filepath}")
         return False
     with open(filepath, 'r', encoding='utf-8') as f:
-        content = f.read()
+        content = f.read().replace('\r\n', '\n')
     if old_text in content:
         content = content.replace(old_text, new_text, 1)
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -23,6 +24,22 @@ def patch_file(filepath, old_text, new_text, description):
         return True
     else:
         print(f"[WARN] Target text not found in {os.path.basename(filepath)}: {description}")
+        return False
+
+def patch_file_regex(filepath, pattern, replacement, description):
+    if not os.path.exists(filepath):
+        print(f"[WARN] File not found: {filepath}")
+        return False
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read().replace('\r\n', '\n')
+    if re.search(pattern, content):
+        content = re.sub(pattern, replacement, content, count=1)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print(f"[OK] Patched (regex) {os.path.basename(filepath)}: {description}")
+        return True
+    else:
+        print(f"[WARN] Regex pattern not found in {os.path.basename(filepath)}: {description}")
         return False
 
 def main():
@@ -82,47 +99,77 @@ def main():
         '#include <charconv>\n#include <cstdlib>',
         'Include cstdlib for strtof/strtod in numeric.h'
     )
-    patch_file(
-        numeric_h,
-        '    auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,\n                                      std::chars_format::general);',
-        '''#if defined(__ANDROID__)
-    char* end_ptr = nullptr;
-    std::string s_val(range);
-    if constexpr (std::is_same_v<T, float>) {
-      result = std::strtof(s_val.c_str(), &end_ptr);
-    } else {
-      result = std::strtod(s_val.c_str(), &end_ptr);
-    }
-    if (end_ptr == s_val.c_str()) {
-      return T();
-    }
-#else
-    auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
-                                      std::chars_format::general);
-#endif''',
-        'Use strtof/strtod for float/double from_chars in numeric.h'
+
+    # Patch detail::fpfs float/double parser (entire else block including error check)
+    pattern_fpfs = (
+        r'(\s+)auto \[p, error\] = std::from_chars\(range\.data\(\), range\.data\(\) \+ range\.size\(\), result,\n'
+        r'\s+std::chars_format::general\);\n'
+        r'\s+//[^\n]*\n'
+        r'\s+if \(error != std::errc\(\)\) \{\n'
+        r'\s+assert_always\(\);\n'
+        r'\s+return T\(\);\n'
+        r'\s+\}\n'
+        r'\s+if \(is_negative\) \{\n'
+        r'\s+result = -result;\n'
+        r'\s+\}'
     )
-    patch_file(
-        numeric_h,
-        '      auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);\n      if (result.ec != std::errc()) {\n        assert_always();\n        return vec128_t();\n      }\n      p = result.ptr;',
-        '''#if defined(__ANDROID__)
-      char* next_p = nullptr;
-      v.f32[i] = std::strtof(p, &next_p);
-      if (next_p == p) {
-        assert_always();
-        return vec128_t();
-      }
-      p = next_p;
+    replacement_fpfs = (
+        r'''\1#if defined(__ANDROID__)
+\1char* end_ptr = nullptr;
+\1std::string s_val(range);
+\1if constexpr (std::is_same_v<T, float>) {
+\1  result = std::strtof(s_val.c_str(), &end_ptr);
+\1} else {
+\1  result = std::strtod(s_val.c_str(), &end_ptr);
+\1}
+\1if (end_ptr == s_val.c_str()) {
+\1  return T();
+\1}
+\1if (is_negative) {
+\1  result = -result;
+\1}
 #else
-      auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
-      if (result.ec != std::errc()) {
-        assert_always();
-        return vec128_t();
-      }
-      p = result.ptr;
-#endif''',
-        'Use strtof for vec128_t from_chars in numeric.h'
+\1auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
+\1                                  std::chars_format::general);
+\1if (error != std::errc()) {
+\1  assert_always();
+\1  return T();
+\1}
+\1if (is_negative) {
+\1  result = -result;
+\1}
+#endif'''
     )
+    patch_file_regex(numeric_h, pattern_fpfs, replacement_fpfs, 'Use strtof/strtod in detail::fpfs on Android')
+
+    # Patch vec128_t float parser
+    pattern_vec128 = (
+        r'(\s+)auto result = std::from_chars\(p, end, v\.f32\[i\], std::chars_format::general\);\n'
+        r'\s+if \(result\.ec != std::errc\(\)\) \{\n'
+        r'\s+assert_always\(\);\n'
+        r'\s+return vec128_t\(\);\n'
+        r'\s+\}\n'
+        r'\s+p = result\.ptr;'
+    )
+    replacement_vec128 = (
+        r'''\1#if defined(__ANDROID__)
+\1char* next_p = nullptr;
+\1v.f32[i] = std::strtof(p, &next_p);
+\1if (next_p == p) {
+\1  assert_always();
+\1  return vec128_t();
+\1}
+\1p = next_p;
+#else
+\1auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
+\1if (result.ec != std::errc()) {
+\1  assert_always();
+\1  return vec128_t();
+\1}
+\1p = result.ptr;
+#endif'''
+    )
+    patch_file_regex(numeric_h, pattern_vec128, replacement_vec128, 'Use strtof in vec128_t on Android')
 
     print("Android patching completed.")
 
