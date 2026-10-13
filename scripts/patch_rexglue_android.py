@@ -208,13 +208,19 @@ void Fiber::Destroy() {
     platform_h = os.path.join(sdk_dir, "include", "rex", "platform.h")
     main_android_contents = '''#ifndef REX_MAIN_ANDROID_H_
 #define REX_MAIN_ANDROID_H_
-
-#if defined(__ANDROID__)
-
+// Minimal replacement for the missing Android platform helper header in
+// rexglue-sdk. It provides the API-level helper used by the POSIX backends
+// (memory_posix.cpp, threading_posix.cpp) without depending on the SDK's
+// android-ndk platform headers being present in the include tree.
+#ifdef __ANDROID__
 #include <android/api-level.h>
-
-#endif  // defined(__ANDROID__)
-
+#ifndef REX_ANDROID_API_LEVEL_DEFINED
+#define REX_ANDROID_API_LEVEL_DEFINED
+namespace rex {
+inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
+}  // namespace rex
+#endif  // REX_ANDROID_API_LEVEL_DEFINED
+#endif  // __ANDROID__
 #endif  // REX_MAIN_ANDROID_H_
 '''
     if os.path.exists(main_android_h):
@@ -223,7 +229,7 @@ void Fiber::Destroy() {
         os.makedirs(os.path.dirname(main_android_h), exist_ok=True)
         with open(main_android_h, 'w', encoding='utf-8') as f:
             f.write(main_android_contents)
-        print("[OK] Added include/rex/main_android.h required by Android threading backend")
+        print("[OK] Added include/rex/main_android.h required by Android POSIX backends")
 
     # 7. Bionic (Android libc) has no robust mutexes: PTHREAD_MUTEX_ROBUST,
     #    pthread_mutexattr_setrobust() and pthread_mutex_consistent() do not
@@ -247,6 +253,15 @@ void Fiber::Destroy() {
     # 8. Fallback guard: if a rexglue-sdk revision hardcodes the robust-mutex
     #    block without checking REX_PLATFORM_ANDROID, disable the bionic calls in
     #    threading_posix.cpp so the Android NDK build compiles.
+    # 8b. memory_posix.cpp calls rex::GetAndroidApiLevel() but does not include
+    #     the helper header. Add the include so the declaration is visible.
+    memory_posix = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
+    patch_file(
+        memory_posix,
+        '#include <rex/platform.h>',
+        '#include <rex/platform.h>\n#include <rex/main_android.h>',
+        'Include Android API-level helper in memory_posix.cpp'
+    )
     threading_posix = os.path.join(sdk_dir, "src", "core", "threading_posix.cpp")
     patch_file(
         threading_posix,
