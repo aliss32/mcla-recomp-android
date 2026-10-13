@@ -201,6 +201,7 @@ void Fiber::Destroy() {
     # 6. Android helpers: supply the header required by the Android POSIX
     #    threading backend and expose the runtime API-level query.
     main_android_h = os.path.join(sdk_dir, "include", "rex", "main_android.h")
+    platform_h = os.path.join(sdk_dir, "include", "rex", "platform.h")
     main_android_contents = '''#ifndef REX_MAIN_ANDROID_H_
 #define REX_MAIN_ANDROID_H_
 #include <cstdint>
@@ -218,6 +219,22 @@ inline int32_t GetAndroidApiLevel() {
 }  // namespace rex
 #endif  // REX_MAIN_ANDROID_H_
 '''
+    if os.path.exists(platform_h):
+        with open(platform_h, "r", encoding="utf-8") as f:
+            platform_content = f.read()
+        if "GetAndroidApiLevel" not in platform_content:
+            platform_marker = "#ifndef REX_PLATFORM_LINUX\n#define REX_PLATFORM_LINUX 0\n#endif"
+            if platform_marker in platform_content:
+                platform_content = platform_content.replace(
+                    platform_marker,
+                    platform_marker + "\n#if REX_PLATFORM_ANDROID\n#include <android/api-level.h>\nnamespace rex {\ninline int GetAndroidApiLevel() {\n  return android_get_device_api_level();\n}\n}  // namespace rex\n#endif",
+                    1,
+                )
+                with open(platform_h, "w", encoding="utf-8") as f:
+                    f.write(platform_content)
+                print("[OK] Added Android API-level declaration to include/rex/platform.h")
+            else:
+                print("[WARN] Could not locate platform macro marker for GetAndroidApiLevel")
     if os.path.exists(main_android_h):
         print("[SKIP] Android helper header already exists: include/rex/main_android.h")
     else:
