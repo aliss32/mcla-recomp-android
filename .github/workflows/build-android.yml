@@ -26,6 +26,8 @@ jobs:
 
 
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install NDK r27c (Clang 18)
         run: sdkmanager "ndk;27.2.12479018"
       - name: Configure Android environment
