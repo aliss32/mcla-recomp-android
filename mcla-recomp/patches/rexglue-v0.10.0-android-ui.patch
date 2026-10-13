@@ -1,0 +1,284 @@
+diff --git a/include/rex/ui/surface_android.h b/include/rex/ui/surface_android.h
+new file mode 100644
+index 0000000..648c51d
+--- /dev/null
++++ b/include/rex/ui/surface_android.h
+@@ -0,0 +1,44 @@
++#pragma once
++#include <cstdint>
++
++#include <android/native_window.h>
++
++#include <rex/ui/surface.h>
++
++namespace rex::ui {
++
++class AndroidNativeWindowSurface final : public Surface {
++ public:
++  explicit AndroidNativeWindowSurface(ANativeWindow* window) : window_(window) {
++    if (window_) {
++      ANativeWindow_acquire(window_);
++    }
++  }
++
++  ~AndroidNativeWindowSurface() override {
++    if (window_) {
++      ANativeWindow_release(window_);
++    }
++  }
++
++  AndroidNativeWindowSurface(const AndroidNativeWindowSurface&) = delete;
++  AndroidNativeWindowSurface& operator=(const AndroidNativeWindowSurface&) = delete;
++
++  TypeIndex GetType() const override { return kTypeIndex_AndroidNativeWindow; }
++  ANativeWindow* window() const { return window_; }
++
++ protected:
++  bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override {
++    if (!window_) {
++      return false;
++    }
++    width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
++    height_out = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
++    return width_out != 0 && height_out != 0;
++  }
++
++ private:
++  ANativeWindow* window_;
++};
++
++}  // namespace rex::ui
+diff --git a/include/rex/ui/vulkan/api.h b/include/rex/ui/vulkan/api.h
+index 246fe22..4bafcc9 100644
+--- a/include/rex/ui/vulkan/api.h
++++ b/include/rex/ui/vulkan/api.h
+@@ -26,13 +26,7 @@
+ #define VULKAN_HPP_NO_TO_STRING
+ #endif
+ 
+-#if REX_PLATFORM_ANDROID
+-#ifndef VK_USE_PLATFORM_ANDROID_KHR
+-#define VK_USE_PLATFORM_ANDROID_KHR
+-#endif
+-#endif
+-
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !REX_PLATFORM_ANDROID
+ #ifndef VK_USE_PLATFORM_XCB_KHR
+ #define VK_USE_PLATFORM_XCB_KHR
+ #endif
+@@ -43,6 +37,11 @@
+ #endif
+ #include <wayland-client.h>
+ #endif
++#if REX_PLATFORM_ANDROID
++#ifndef VK_USE_PLATFORM_ANDROID_KHR
++#define VK_USE_PLATFORM_ANDROID_KHR
++#endif
++#endif
+ 
+ #if REX_PLATFORM_WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+diff --git a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+index 4edde2b..0ab5e7e 100644
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -56,11 +56,11 @@ class VulkanInstance {
+     // VK_KHR_surface (#1)
+ #include <rex/ui/vulkan/functions/instance_khr_surface.inc>
+     // VK_KHR_xcb_surface (#6)
+-#ifdef VK_USE_PLATFORM_XCB_KHR
++#if defined(VK_USE_PLATFORM_XCB_KHR) && !REX_PLATFORM_ANDROID
+ #include <rex/ui/vulkan/functions/instance_khr_xcb_surface.inc>
+ #endif
+     // VK_KHR_wayland_surface (#7)
+-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
++#if defined(VK_USE_PLATFORM_WAYLAND_KHR) && !REX_PLATFORM_ANDROID
+ #include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
+ #endif
+     // VK_KHR_android_surface (#9)
+@@ -91,10 +91,10 @@ class VulkanInstance {
+   // supported (with the `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
+     bool ext_KHR_surface = false;  // #1
+-#ifdef VK_USE_PLATFORM_XCB_KHR
++#if defined(VK_USE_PLATFORM_XCB_KHR) && !REX_PLATFORM_ANDROID
+     bool ext_KHR_xcb_surface = false;  // #6
+ #endif
+-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
++#if defined(VK_USE_PLATFORM_WAYLAND_KHR) && !REX_PLATFORM_ANDROID
+     bool ext_KHR_wayland_surface = false;  // #7
+ #endif
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+diff --git a/include/rex/ui/window.h b/include/rex/ui/window.h
+index f607be2..741f333 100644
+--- a/include/rex/ui/window.h
++++ b/include/rex/ui/window.h
+@@ -286,8 +286,8 @@ class Window {
+   void SetIcon(const void* buffer, size_t size);
+   void ResetIcon() { SetIcon(nullptr, 0); }
+ 
+-  /// Returns the platform-native window handle (HWND on Windows), or nullptr.
+-  /// Valid after Open() returns successfully.
++  /// Returns the platform-native window handle (HWND on Windows, ANativeWindow
++  /// on Android), or nullptr. Valid after Open() returns successfully.
+   virtual void* GetNativeWindowHandle() const { return nullptr; }
+ 
+   // Desired state stored by the common Window, externally modifiable, read-only
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index 5bd3dc5..06acf75 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -72,6 +72,10 @@ elseif(APPLE)
+     set(REXUI_PLATFORM_SOURCES
+         surface_mac.cpp
+     )
++elseif(ANDROID)
++    set(REXUI_PLATFORM_SOURCES
++        surface_android.cpp
++    )
+ else()
+     set(REXUI_PLATFORM_SOURCES
+         surface_gnulinux.cpp
+@@ -146,7 +150,7 @@ if(REXGLUE_USE_VULKAN)
+ endif()
+ 
+ # Platform-specific dependencies
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT ANDROID)
+     find_package(PkgConfig REQUIRED)
+     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
+     # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every
+@@ -163,6 +167,8 @@ if(UNIX AND NOT APPLE)
+     )
+ elseif(APPLE)
+     target_link_libraries(rexui PRIVATE "-framework CoreFoundation")
++elseif(ANDROID)
++    target_link_libraries(rexui PRIVATE android)
+ endif()
+ 
+ if(WIN32)
+diff --git a/src/ui/surface_android.cpp b/src/ui/surface_android.cpp
+new file mode 100644
+index 0000000..be7f371
+--- /dev/null
++++ b/src/ui/surface_android.cpp
+@@ -0,0 +1 @@
++#include <rex/ui/surface_android.h>
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index 914b311..edc89ea 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -140,12 +140,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   if (with_surface) {
+     // #1.
+     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
+-#ifdef VK_USE_PLATFORM_XCB_KHR
++#if defined(VK_USE_PLATFORM_XCB_KHR) && !REX_PLATFORM_ANDROID
+     // #6.
+     requested_extensions.emplace("VK_KHR_xcb_surface",
+                                  &vulkan_instance->extensions_.ext_KHR_xcb_surface);
+ #endif
+-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
++#if defined(VK_USE_PLATFORM_WAYLAND_KHR) && !REX_PLATFORM_ANDROID
+     // #7.
+     requested_extensions.emplace("VK_KHR_wayland_surface",
+                                  &vulkan_instance->extensions_.ext_KHR_wayland_surface);
+@@ -413,12 +413,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+ #include <rex/ui/vulkan/functions/instance_1_1_khr_get_physical_device_properties2.inc>
+     }
+   }
+-#ifdef VK_USE_PLATFORM_XCB_KHR
++#if defined(VK_USE_PLATFORM_XCB_KHR) && !REX_PLATFORM_ANDROID
+   if (vulkan_instance->extensions_.ext_KHR_xcb_surface) {
+ #include <rex/ui/vulkan/functions/instance_khr_xcb_surface.inc>
+   }
+ #endif
+-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
++#if defined(VK_USE_PLATFORM_WAYLAND_KHR) && !REX_PLATFORM_ANDROID
+   if (vulkan_instance->extensions_.ext_KHR_wayland_surface) {
+ #include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
+   }
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..9da28cd 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -36,7 +36,7 @@
+ #if REX_PLATFORM_ANDROID
+ #include <rex/ui/surface_android.h>
+ #endif
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !REX_PLATFORM_ANDROID
+ #include <rex/ui/surface_gnulinux.h>
+ #endif
+ #if REX_PLATFORM_WIN32
+@@ -428,7 +428,7 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
+     type_flags |= Surface::kTypeFlag_AndroidNativeWindow;
+   }
+ #endif
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !REX_PLATFORM_ANDROID
+   if (instance_extensions.ext_KHR_wayland_surface) {
+     type_flags |= Surface::kTypeFlag_WaylandSurface;
+   }
+@@ -809,7 +809,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+       } break;
+ #endif
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !REX_PLATFORM_ANDROID
+       case Surface::kTypeIndex_XcbWindow: {
+         auto& xcb_window_surface = static_cast<const XcbWindowSurface&>(new_surface);
+         VkXcbSurfaceCreateInfoKHR surface_create_info;
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 2251429..1cde758 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -35,7 +35,9 @@
+ #include <SDL3/SDL_metal.h>
+ 
+ #include <rex/ui/surface_mac.h>
+-#else
++#elif REX_PLATFORM_ANDROID
++#include <rex/ui/surface_android.h>
++#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)
+ #include <X11/Xlib-xcb.h>
+ #include <rex/ui/surface_gnulinux.h>
+ #endif
+@@ -229,10 +231,13 @@ void WindowSDL::DestroySDLWindow() {
+ }
+ 
+ void* WindowSDL::GetNativeWindowHandle() const {
+-#if REX_PLATFORM_WIN32
+   if (!sdl_window_) {
+     return nullptr;
+   }
++#if REX_PLATFORM_ANDROID
++  return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
++                                SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
++#elif REX_PLATFORM_WIN32
+   return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
+                                 SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+ #else
+@@ -387,6 +392,12 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
+       return std::make_unique<Win32HwndSurface>(hinstance, hwnd);
+     }
+   }
++#elif REX_PLATFORM_ANDROID
++  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow) {
++    if (auto* native_window = static_cast<ANativeWindow*>(GetNativeWindowHandle())) {
++      return std::make_unique<AndroidNativeWindowSurface>(native_window);
++    }
++  }
+ #elif REX_PLATFORM_MAC
+   if (allowed_types & Surface::kTypeFlag_CAMetalLayer) {
+     SDL_MetalView metal_view = SDL_Metal_CreateView(sdl_window_);
+@@ -398,7 +409,7 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
+       SDL_Metal_DestroyView(metal_view);
+     }
+   }
+-#else
++#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)
+   SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
+   if (allowed_types & Surface::kTypeFlag_WaylandSurface) {
+     auto* wl_display_ptr = static_cast<struct wl_display*>(
