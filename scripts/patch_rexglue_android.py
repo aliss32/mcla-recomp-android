@@ -73,6 +73,26 @@ def main():
         'Link libandroid.so to rexui'
     )
 
+    # REX_PLATFORM_GNU_LINUX is also set for Android in this SDK build. Exclude
+    # Android from all GNU/Linux-specific SDL headers and XCB implementation.
+    window_sdl = os.path.join(sdk_dir, "src", "ui", "window_sdl.cpp")
+    for old_arm, description in (
+        ('#elif REX_PLATFORM_GNU_LINUX\n#include <X11/Xlib-xcb.h>', 'X11/Xlib-xcb.h'),
+        ('#elif REX_PLATFORM_GNU_LINUX\n#include <rex/ui/surface_gnulinux.h>', 'GNU/Linux surface header'),
+        ('#elif REX_PLATFORM_GNU_LINUX\n  if (allowed_types & Surface::kTypeFlag_XcbWindow)', 'GNU/Linux XCB surface implementation'),
+    ):
+        new_arm = old_arm.replace(
+            '#elif REX_PLATFORM_GNU_LINUX',
+            '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)',
+            1,
+        )
+        patch_file(window_sdl, old_arm, new_arm, f'Exclude {description} from Android')
+    with open(window_sdl, 'r', encoding='utf-8') as f:
+        window_content = f.read()
+    if window_content.count('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)') < 3:
+        print('[ERROR] Android exclusion missing from GNU/Linux window branches')
+        return 1
+
     # 2. Chrono: Polyfill clock_cast on Android libc++
     chrono_h = os.path.join(sdk_dir, "include", "rex", "chrono", "chrono.h")
     patch_file(
