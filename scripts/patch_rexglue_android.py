@@ -198,38 +198,41 @@ void Fiber::Destroy() {
         'Close Android #if in fiber_posix.cpp'
     )
 
-    # 6. main_android.h: the Android POSIX threading backend
-    #    (src/core/threading_posix.cpp) includes <rex/main_android.h>.
-    #    Generate that header inside the SDK include tree so the include resolves.
-    #    Do NOT redeclare GetAndroidApiLevel() in platform.h: the rex sources
-    #    already define it elsewhere and adding a second definition there causes a
-    #    'redefinition of GetAndroidApiLevel' error in Android translation units.
+    # 6. The pinned SDK may already contain a stub main_android.h. Always replace
+    #    it with the Bionic API-level wrapper used by memory_posix.cpp.
     main_android_h = os.path.join(sdk_dir, "include", "rex", "main_android.h")
     platform_h = os.path.join(sdk_dir, "include", "rex", "platform.h")
     main_android_contents = '''#ifndef REX_MAIN_ANDROID_H_
 #define REX_MAIN_ANDROID_H_
-// Minimal replacement for the missing Android platform helper header in
-// rexglue-sdk. It provides the API-level helper used by the POSIX backends
-// (memory_posix.cpp, threading_posix.cpp) without depending on the SDK's
-// android-ndk platform headers being present in the include tree.
 #ifdef __ANDROID__
 #include <android/api-level.h>
-#ifndef REX_ANDROID_API_LEVEL_DEFINED
-#define REX_ANDROID_API_LEVEL_DEFINED
 namespace rex {
 inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
 }  // namespace rex
-#endif  // REX_ANDROID_API_LEVEL_DEFINED
 #endif  // __ANDROID__
 #endif  // REX_MAIN_ANDROID_H_
 '''
-    if os.path.exists(main_android_h):
-        print("[SKIP] Android helper header already exists: include/rex/main_android.h")
-    else:
-        os.makedirs(os.path.dirname(main_android_h), exist_ok=True)
-        with open(main_android_h, 'w', encoding='utf-8') as f:
-            f.write(main_android_contents)
-        print("[OK] Added include/rex/main_android.h required by Android POSIX backends")
+    os.makedirs(os.path.dirname(main_android_h), exist_ok=True)
+    with open(main_android_h, 'w', encoding='utf-8') as f:
+        f.write(main_android_contents)
+    print("[OK] Wrote Android API-level wrapper to include/rex/main_android.h")
+
+    memory_posix = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
+    if not os.path.exists(memory_posix):
+        print("[ERROR] Required Android source file is missing: memory_posix.cpp")
+        return 1
+    with open(memory_posix, 'r', encoding='utf-8') as f:
+        memory_content = f.read().replace('\r\n', '\n')
+    android_block = '#if REX_PLATFORM_ANDROID\n'
+    helper_block = android_block + '#include <rex/main_android.h>'
+    if helper_block not in memory_content:
+        if android_block not in memory_content:
+            print("[ERROR] Could not find Android section in memory_posix.cpp")
+            return 1
+        memory_content = memory_content.replace(android_block, helper_block + '\n', 1)
+        with open(memory_posix, 'w', encoding='utf-8') as f:
+            f.write(memory_content)
+        print("[OK] Added main_android.h before Android API-level calls")
 
     # 7. Bionic (Android libc) has no robust mutexes: PTHREAD_MUTEX_ROBUST,
     #    pthread_mutexattr_setrobust() and pthread_mutex_consistent() do not
