@@ -73,25 +73,64 @@ def main():
         'Link libandroid.so to rexui'
     )
 
-    # REX_PLATFORM_GNU_LINUX is also set for Android in this SDK build. Exclude
-    # Android from all GNU/Linux-specific SDL headers and XCB implementation.
+    # ReXGlue v0.10.0's SDL file has a platform-specific include chain: Android
+    # already has an ANativeWindow surface, while the X11 include is in the
+    # final #else and must not be selected on Android. Guard that fallback.
     window_sdl = os.path.join(sdk_dir, "src", "ui", "window_sdl.cpp")
-    for old_arm, description in (
-        ('#elif REX_PLATFORM_GNU_LINUX\n#include <X11/Xlib-xcb.h>', 'X11/Xlib-xcb.h'),
-        ('#elif REX_PLATFORM_GNU_LINUX\n#include <rex/ui/surface_gnulinux.h>', 'GNU/Linux surface header'),
-        ('#elif REX_PLATFORM_GNU_LINUX\n  if (allowed_types & Surface::kTypeFlag_XcbWindow)', 'GNU/Linux XCB surface implementation'),
-    ):
-        new_arm = old_arm.replace(
-            '#elif REX_PLATFORM_GNU_LINUX',
-            '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)',
-            1,
-        )
-        patch_file(window_sdl, old_arm, new_arm, f'Exclude {description} from Android')
-    with open(window_sdl, 'r', encoding='utf-8') as f:
-        window_content = f.read()
-    if window_content.count('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)') < 3:
-        print('[ERROR] Android exclusion missing from GNU/Linux window branches')
+    if not os.path.exists(window_sdl):
+        print(f"[ERROR] Required SDL window source is missing: {window_sdl}")
         return 1
+    with open(window_sdl, 'r', encoding='utf-8') as f:
+        window_content = f.read().replace('\\r\\n', '\\n')
+
+    x11_include_fallback = '#else\n#include <X11/Xlib-xcb.h>'
+    guarded_x11_include = ('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
+                           '#include <X11/Xlib-xcb.h>')
+    if x11_include_fallback in window_content:
+        window_content = window_content.replace(x11_include_fallback, guarded_x11_include, 1)
+        print('[OK] Added Android exclusion to fallback X11 SDL headers')
+    elif guarded_x11_include in window_content:
+        print('[SKIP] Fallback X11 SDL headers are already Android-guarded')
+    else:
+        print('[ERROR] Could not locate the v0.10.0 fallback X11 include')
+        return 1
+    # In CreateSurfaceImpl, the #else after macOS would select the XCB branch
+    # on Android too. Turn it into an explicit GNU/Linux-only branch.
+    surface_anchor = (
+        '#elif REX_PLATFORM_MAC\n'
+        '  if (allowed_types & Surface::kTypeFlag_CAMetalLayer)'
+    )
+    surface_start = window_content.find(surface_anchor)
+    xcb_start = window_content.find(
+        'if (allowed_types & Surface::kTypeFlag_XcbWindow)', surface_start
+    )
+    xcb_fallback = window_content.find('#else', surface_start, xcb_start)
+    guarded_xcb = '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)'
+    if surface_start >= 0 and xcb_start >= 0:
+        if xcb_fallback >= 0:
+            window_content = (window_content[:xcb_fallback] + guarded_xcb
+                              + window_content[xcb_fallback + len('#else'):])
+            print('[OK] Added Android exclusion to fallback XCB surface branch')
+        elif guarded_xcb in window_content[surface_start:xcb_start]:
+            print('[SKIP] Fallback XCB surface branch is already Android-guarded')
+        else:
+            print('[ERROR] Could not isolate the v0.10.0 XCB surface fallback')
+            return 1
+    else:
+        print('[ERROR] Could not locate the v0.10.0 CreateSurfaceImpl XCB branch')
+        return 1
+    if x11_include_fallback in window_content:
+        print('[ERROR] An unguarded X11 include remains in window_sdl.cpp')
+        return 1
+    if not re.search(
+        r'#elif REX_PLATFORM_GNU_LINUX && !defined\(__ANDROID__\)\s+'
+        r'SDL_PropertiesID props[\s\S]*?Surface::kTypeFlag_XcbWindow',
+        window_content,
+    ):
+        print('[ERROR] XCB surface code is not guarded from Android')
+        return 1
+    with open(window_sdl, 'w', encoding='utf-8') as f:
+        f.write(window_content)
 
     # 2. Chrono: Polyfill clock_cast on Android libc++
     chrono_h = os.path.join(sdk_dir, "include", "rex", "chrono", "chrono.h")
