@@ -111,6 +111,93 @@ def main():
         else:
             print(f"[WARN] Guard not found in numeric.h")
 
+    # 5. Fiber: Android lacks ucontext.h functions (getcontext/makecontext/swapcontext).
+    #    Provide thread-fiber support for Android (same approach as PS5).
+    fiber_h = os.path.join(sdk_dir, "include", "rex", "thread", "fiber.h")
+    patch_file(
+        fiber_h,
+        '#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n#if REX_PLATFORM_MAC && !defined(_XOPEN_SOURCE)',
+        '#if (REX_PLATFORM_LINUX || REX_PLATFORM_MAC) && !defined(__ANDROID__)\n#if REX_PLATFORM_MAC && !defined(_XOPEN_SOURCE)',
+        'Skip ucontext.h include on Android'
+    )
+    patch_file(
+        fiber_h,
+        '#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n  ucontext_t context_{};',
+        '#elif (REX_PLATFORM_LINUX || REX_PLATFORM_MAC) && !defined(__ANDROID__)\n  ucontext_t context_{};',
+        'Skip ucontext_t members on Android'
+    )
+    patch_file(
+        fiber_h,
+        '#elif REX_PLATFORM_PS5\n  // Thread fibers only; see fiber_ps5.cpp.\n  bool is_thread_fiber_ = false;\n#endif',
+        '#elif REX_PLATFORM_PS5 || defined(__ANDROID__)\n  // Thread fibers only; see fiber_ps5.cpp / fiber_posix.cpp.\n  bool is_thread_fiber_ = false;\n#endif',
+        'Use thread-fiber member on Android'
+    )
+
+    fiber_posix = os.path.join(sdk_dir, "src", "core", "fiber_posix.cpp")
+    fiber_android_impl = '''#include <rex/platform.h>
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+
+#if defined(__ANDROID__)
+
+#include <rex/thread/fiber.h>
+
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
+
+namespace rex::thread {
+
+thread_local Fiber* Fiber::tls_current_ = nullptr;
+
+Fiber* Fiber::ConvertCurrentThread() {
+  auto* f = new Fiber();
+  f->is_thread_fiber_ = true;
+  tls_current_ = f;
+  return f;
+}
+
+Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
+  (void)stack_size;
+  (void)entry;
+  (void)arg;
+  std::fputs("rex::thread::Fiber::Create is not implemented on Android\\n", stderr);
+  return nullptr;
+}
+
+void Fiber::SwitchTo(Fiber* target) {
+  (void)target;
+  std::fputs("rex::thread::Fiber::SwitchTo is not implemented on Android\\n", stderr);
+  std::abort();
+}
+
+void Fiber::Destroy() {
+  if (is_thread_fiber_) {
+    tls_current_ = nullptr;
+  } else {
+    assert(this != tls_current_ && "Destroy called on the currently running fiber");
+  }
+  delete this;
+}
+
+}  // namespace rex::thread
+
+#else
+
+#include <rex/thread/fiber.h>'''
+
+    patch_file(
+        fiber_posix,
+        '#include <rex/platform.h>\n#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n\n#include <rex/thread/fiber.h>',
+        fiber_android_impl,
+        'Add Android thread-fiber implementation in fiber_posix.cpp'
+    )
+    patch_file(
+        fiber_posix,
+        '}  // namespace rex::thread\n\n#endif  // REX_PLATFORM_LINUX || REX_PLATFORM_MAC',
+        '}  // namespace rex::thread\n\n#endif  // !defined(__ANDROID__)\n\n#endif  // REX_PLATFORM_LINUX || REX_PLATFORM_MAC',
+        'Close Android #if in fiber_posix.cpp'
+    )
+
     print("Android patching completed.")
 
 if __name__ == "__main__":
