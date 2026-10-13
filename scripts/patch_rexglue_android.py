@@ -198,29 +198,32 @@ void Fiber::Destroy() {
         'Close Android #if in fiber_posix.cpp'
     )
 
-    # 6. Platform: Define rex::GetAndroidApiLevel() in platform.h
-    #    memory_posix.cpp and threading_posix.cpp query this on Android
-    platform_h = os.path.join(sdk_dir, "include", "rex", "platform.h")
-    api_level_impl = '''#ifndef REX_PLATFORM_LINUX
-#define REX_PLATFORM_LINUX 0
-#endif
-
-#if REX_PLATFORM_ANDROID
+    # 6. Android helpers: supply the header required by the Android POSIX
+    #    threading backend and expose the runtime API-level query.
+    main_android_h = os.path.join(sdk_dir, "include", "rex", "main_android.h")
+    main_android_contents = '''#ifndef REX_MAIN_ANDROID_H_
+#define REX_MAIN_ANDROID_H_
+#include <cstdint>
+#if defined(__ANDROID__)
 #include <android/api-level.h>
+#endif
 namespace rex {
-inline int GetAndroidApiLevel() {
+inline int32_t GetAndroidApiLevel() {
+#if defined(__ANDROID__)
   return android_get_device_api_level();
+#else
+  return 0;
+#endif
 }
 }  // namespace rex
-#endif'''
-
-    patch_file(
-        platform_h,
-        '#ifndef REX_PLATFORM_LINUX\n#define REX_PLATFORM_LINUX 0\n#endif',
-        api_level_impl,
-        'Define rex::GetAndroidApiLevel() in platform.h'
-    )
-
+#endif  // REX_MAIN_ANDROID_H_
+'''
+    if os.path.exists(main_android_h):
+        print("[SKIP] Android helper header already exists: include/rex/main_android.h")
+    else:
+        os.makedirs(os.path.dirname(main_android_h), exist_ok=True)
+        with open(main_android_h, 'w', encoding='utf-8') as f:
+            f.write(main_android_contents)
     print("Android patching completed.")
 
 if __name__ == "__main__":
