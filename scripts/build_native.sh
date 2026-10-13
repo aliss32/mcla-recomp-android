@@ -15,7 +15,7 @@ REXSDK_DIR="${REXSDK_DIR:-/tmp/rexglue-sdk}"
 # Android's surface and SDL windowing changes are kept in a patch of their
 # own so the PS5 patch stays untouched; apply it to the pinned checkout once.
 ANDROID_UI_PATCH="$REPO/mcla-recomp/patches/rexglue-v0.10.0-android-ui.patch"
-if [ -d "$REXSDK_DIR/.git" ] && ! grep -q "AND NOT ANDROID" "$REXSDK_DIR/src/ui/CMakeLists.txt"; then
+if [ -d "$REXSDK_DIR/.git" ] && [ ! -f "$REXSDK_DIR/src/ui/surface_android.cpp" ]; then
   echo "== Applying Android UI patch to $REXSDK_DIR"
   git -C "$REXSDK_DIR" apply "$ANDROID_UI_PATCH"
 fi
