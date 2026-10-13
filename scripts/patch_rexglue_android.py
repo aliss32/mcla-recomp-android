@@ -198,6 +198,29 @@ void Fiber::Destroy() {
         'Close Android #if in fiber_posix.cpp'
     )
 
+    # 6. Platform: Define rex::GetAndroidApiLevel() in platform.h
+    #    memory_posix.cpp and threading_posix.cpp query this on Android
+    platform_h = os.path.join(sdk_dir, "include", "rex", "platform.h")
+    api_level_impl = '''#ifndef REX_PLATFORM_LINUX
+#define REX_PLATFORM_LINUX 0
+#endif
+
+#if REX_PLATFORM_ANDROID
+#include <android/api-level.h>
+namespace rex {
+inline int GetAndroidApiLevel() {
+  return android_get_device_api_level();
+}
+}  // namespace rex
+#endif'''
+
+    patch_file(
+        platform_h,
+        '#ifndef REX_PLATFORM_LINUX\n#define REX_PLATFORM_LINUX 0\n#endif',
+        api_level_impl,
+        'Define rex::GetAndroidApiLevel() in platform.h'
+    )
+
     print("Android patching completed.")
 
 if __name__ == "__main__":
