@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Applies Android compatibility patches to rexglue-sdk after the upstream
-PS5/MCLA patches have been applied.
+Applies Android-only compatibility patches to the pinned ReXGlue SDK after
+the MCLA-specific SDK patch has been applied.
 """
 import os
 import re
@@ -60,12 +60,23 @@ def main():
         '# pkg_check_modules(X11_XCB REQUIRED x11-xcb) - skipped on Android',
         'Comment out X11-XCB pkg-config check'
     )
-    patch_file(
-        ui_cmake,
-        'elseif(PS5)\n    # No window system surface; presentation is VK_KHR_display.\n    set(REXUI_PLATFORM_SOURCES)',
-        'elseif(PS5)\n    # No window system surface; presentation is VK_KHR_display.\n    set(REXUI_PLATFORM_SOURCES)\nelseif(ANDROID)\n    set(REXUI_PLATFORM_SOURCES)',
-        'Set empty REXUI_PLATFORM_SOURCES for Android'
-    )
+    # Select the Android-only surface implementation.
+    if os.path.exists(ui_cmake):
+        with open(ui_cmake, 'r', encoding='utf-8') as f:
+            ui_content = f.read()
+        android_surface_sources = ('elseif(ANDROID)\n'
+                                   '    set(REXUI_PLATFORM_SOURCES\n'
+                                   '        surface_android.cpp\n'
+                                   '    )')
+        if android_surface_sources not in ui_content:
+            platform_if = 'if(WIN32)'
+            if platform_if not in ui_content:
+                print('[ERROR] Could not locate the UI platform-source selector')
+                return 1
+            ui_content = ui_content.replace(platform_if, android_surface_sources + '\n' + platform_if, 1)
+            with open(ui_cmake, 'w', encoding='utf-8') as f:
+                f.write(ui_content)
+            print('[OK] Added Android-only surface source')
     patch_file(
         ui_cmake,
         'elseif(APPLE)\n    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")',
@@ -73,9 +84,8 @@ def main():
         'Link libandroid.so to rexui'
     )
 
-    # ReXGlue v0.10.0's SDL file has a platform-specific include chain: Android
-    # already has an ANativeWindow surface, while the X11 include is in the
-    # final #else and must not be selected on Android. Guard that fallback.
+    # The pinned SDL file puts X11 in a final #else; make desktop selection
+    # explicit, then add the Android ANativeWindow surface path.
     window_sdl = os.path.join(sdk_dir, "src", "ui", "window_sdl.cpp")
     if not os.path.exists(window_sdl):
         print(f"[ERROR] Required SDL window source is missing: {window_sdl}")
@@ -145,21 +155,21 @@ def main():
     core_cmake = os.path.join(sdk_dir, "src", "core", "CMakeLists.txt")
     patch_file(
         core_cmake,
-        'elseif(PS5)\n    # No librt or libdl: threads and timers come from the SDK\'s libc/libkernel.\nelseif(UNIX)',
-        'elseif(PS5)\n    # No librt or libdl: threads and timers come from the SDK\'s libc/libkernel.\nelseif(ANDROID)\n    target_link_libraries(rexcore PRIVATE dl log)\nelseif(UNIX)',
+        'if(UNIX)\n    target_link_libraries(rexcore PRIVATE pthread rt dl)',
+        'if(ANDROID)\n    target_link_libraries(rexcore PRIVATE dl log)\nelse()\n    target_link_libraries(rexcore PRIVATE pthread rt dl)\nendif()',
         'Link dl log to rexcore on Android (no librt.so)'
     )
 
     # 4. Numeric: Add Android to portable_float_from_chars preprocessor guard
     #    Android NDK libc++ lacks float std::from_chars. The SDK already has a
-    #    portable_float_from_chars fallback used for Mac/PS5; we just add Android
+    #    portable_float_from_chars fallback used for macOS; add Android
     #    to that same preprocessor condition (4 occurrences in numeric.h).
     numeric_h = os.path.join(sdk_dir, "include", "rex", "string", "numeric.h")
     if os.path.exists(numeric_h):
         with open(numeric_h, 'r', encoding='utf-8') as f:
             nc = f.read().replace('\r\n', '\n')
-        old_guard = '#if REX_PLATFORM_MAC || REX_PLATFORM_PS5'
-        new_guard = '#if REX_PLATFORM_MAC || REX_PLATFORM_PS5 || defined(__ANDROID__)'
+        old_guard = '#if REX_PLATFORM_MAC'
+        new_guard = '#if REX_PLATFORM_MAC || defined(__ANDROID__)'
         if new_guard in nc:
             print(f"[SKIP] Already patched numeric.h: portable_float_from_chars guard")
         elif old_guard in nc:
@@ -171,7 +181,7 @@ def main():
             print(f"[WARN] Guard not found in numeric.h")
 
     # 5. Fiber: Android lacks ucontext.h functions (getcontext/makecontext/swapcontext).
-    #    Provide thread-fiber support for Android (same approach as PS5).
+    #    Provide the Android thread-only fiber implementation.
     fiber_h = os.path.join(sdk_dir, "include", "rex", "thread", "fiber.h")
     patch_file(
         fiber_h,
@@ -187,8 +197,8 @@ def main():
     )
     patch_file(
         fiber_h,
-        '#elif REX_PLATFORM_PS5\n  // Thread fibers only; see fiber_ps5.cpp.\n  bool is_thread_fiber_ = false;\n#endif',
-        '#elif REX_PLATFORM_PS5 || defined(__ANDROID__)\n  // Thread fibers only; see fiber_ps5.cpp / fiber_posix.cpp.\n  bool is_thread_fiber_ = false;\n#endif',
+        '#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fiber_ = false;\n\n  static void Trampoline();\n#endif',
+        '#elif REX_PLATFORM_LINUX && !defined(__ANDROID__)\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fiber_ = false;\n\n  static void Trampoline();\n#elif REX_PLATFORM_ANDROID\n  bool is_thread_fiber_ = false;\n#endif',
         'Use thread-fiber member on Android'
     )
 
