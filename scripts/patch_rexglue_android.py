@@ -45,6 +45,54 @@ def patch_file_regex(filepath, pattern, replacement, description):
         return False
 
 
+def insert_android_elseif_after_apple(ui_content):
+    """Insert an Android `elseif` branch into the platform-selection chain safely.
+
+    Strategy:
+    - Find the first occurrence of 'elseif(APPLE)'.
+    - Locate the end of that branch by searching for the next '\nelseif(' or '\nelse' or '\nendif'.
+    - Insert the Android branch just before that next sibling, preserving existing structure.
+    - If we can't find 'elseif(APPLE)', fall back to inserting after 'if(WIN32)'.
+    """
+    anchor = 'elseif(APPLE)'
+    insert_block = (
+        '\nelseif(ANDROID)\n'
+        '    set(REXUI_PLATFORM_SOURCES\n'
+        '        surface_android.cpp\n'
+        '    )\n'
+    )
+    pos = ui_content.find(anchor)
+    if pos == -1:
+        # fallback: try to insert after the first 'if(WIN32)' block's end (before its siblings)
+        fallback_anchor = 'if(WIN32)'
+        pos2 = ui_content.find(fallback_anchor)
+        if pos2 == -1:
+            return ui_content, False
+        # find the next sibling after if(WIN32)
+        search_start = pos2 + len(fallback_anchor)
+    else:
+        search_start = pos + len(anchor)
+
+    # find next sibling keywords
+    candidates = []
+    for key in ['\nelseif(', '\nelse', '\nendif']:
+        idx = ui_content.find(key, search_start)
+        if idx != -1:
+            candidates.append(idx)
+    if candidates:
+        insert_at = min(candidates)
+    else:
+        insert_at = len(ui_content)
+
+    # avoid duplicating if already present in the nearby region
+    window = ui_content[search_start:insert_at + 40]
+    if 'elseif(ANDROID)' in window:
+        return ui_content, True
+
+    new_content = ui_content[:insert_at] + insert_block + ui_content[insert_at:]
+    return new_content, True
+
+
 def main():
     sdk_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rexglue-sdk"
     print(f"Applying Android patches to ReXGlue SDK at: {sdk_dir}")
@@ -67,19 +115,20 @@ def main():
     if os.path.exists(ui_cmake):
         with open(ui_cmake, 'r', encoding='utf-8') as f:
             ui_content = f.read()
-        android_surface_sources = ('elseif(ANDROID)\n'
-                                   '    set(REXUI_PLATFORM_SOURCES\n'
-                                   '        surface_android.cpp\n'
-                                   '    )')
-        if android_surface_sources not in ui_content:
-            platform_if = 'if(WIN32)'
-            if platform_if not in ui_content:
-                print('[ERROR] Could not locate the UI platform-source selector')
-                return 1
-            ui_content = ui_content.replace(platform_if, android_surface_sources + '\n' + platform_if, 1)
+
+        # Safely insert Android elseif into the existing platform-selection chain
+        new_ui_content, ok = insert_android_elseif_after_apple(ui_content)
+        if not ok:
+            print('[ERROR] Could not locate the UI platform-source selector to insert Android branch')
+            return 1
+        if new_ui_content != ui_content:
             with open(ui_cmake, 'w', encoding='utf-8') as f:
-                f.write(ui_content)
-            print('[OK] Added Android-only surface source')
+                f.write(new_ui_content)
+            print('[OK] Added Android-only surface source (safe insertion)')
+        else:
+            print('[SKIP] Android-only surface source already present')
+
+    # Link libandroid.so to rexui (add Android branch to apple block if necessary)
     patch_file(
         ui_cmake,
         'elseif(APPLE)\n    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")',
