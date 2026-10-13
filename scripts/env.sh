@@ -1,25 +1,50 @@
 #!/bin/bash
 # Shared environment for the LibertyRecomp Android scripts. Source it:
 #   . os/android/scripts/env.sh
-# Written for Git Bash on Windows; every path can be overridden from outside.
+# Supports Git Bash on Windows and Linux/macOS CI; every path can be overridden.
 
 _scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export APP_DIR="$(cd "$_scripts_dir/.." && pwd)"
 export REPO="$APP_DIR"
 
-if [ -z "${ANDROID_HOME:-}" ]; then
-  if [ -n "${LOCALAPPDATA:-}" ]; then
-    ANDROID_HOME="$(cygpath -u "$LOCALAPPDATA")/Android/Sdk"
-  else
-    ANDROID_HOME="$HOME/Android/Sdk"
-  fi
-fi
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ -z "${ANDROID_HOME:-}" ]; then
+      if [ -n "${LOCALAPPDATA:-}" ]; then
+        ANDROID_HOME="$(cygpath -u "$LOCALAPPDATA")/Android/Sdk"
+      else
+        ANDROID_HOME="$HOME/Android/Sdk"
+      fi
+    fi
+    ;;
+  *)
+    ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${HOME}/Android/Sdk}}"
+    ;;
+esac
 export ANDROID_HOME
-export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 export NDK_VER="${NDK_VER:-27.2.12479018}"
 export ANDROID_NDK="${ANDROID_NDK:-$ANDROID_HOME/ndk/$NDK_VER}"
-export JAVA_HOME="${JAVA_HOME:-/c/Program Files/Android/Android Studio/jbr}"
-
+if [ -z "${JAVA_HOME:-}" ]; then
+  if [ -n "${ANDROID_STUDIO_JBR:-}" ]; then
+    JAVA_HOME="$ANDROID_STUDIO_JBR"
+  elif [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
+    if command -v java >/dev/null 2>&1; then
+      _java_windows="$(cygpath -w "$(command -v java)")"
+      _java_bin="$(dirname "$_java_windows")"
+      JAVA_HOME="$(cygpath -u "$_java_bin")"
+    else
+      JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"
+    fi
+  elif command -v java >/dev/null 2>&1; then
+    _java_path="$(readlink -f "$(command -v java)")"
+    JAVA_HOME="$(dirname "$_java_path")"
+  else
+    echo "ERROR: JAVA_HOME is unset and java was not found on PATH" >&2
+    return 1 2>/dev/null || exit 1
+  fi
+fi
+export JAVA_HOME
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) _host=windows-x86_64 ;;
   Darwin)               _host=darwin-x86_64 ;;

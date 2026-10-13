@@ -73,10 +73,10 @@ jobs:
         run: chmod +x gradlew scripts/*.sh
 
       - name: Build driver proxy
-        run: bash scripts/build_driver_proxy.sh || true
+        run: bash -euxo pipefail scripts/build_driver_proxy.sh
 
       - name: Build MCLA native (libmain.so)
-        run: bash scripts/build_native.sh
+        run: bash -euxo pipefail scripts/build_native.sh
 
       - name: Verify staged libraries
         run: |
