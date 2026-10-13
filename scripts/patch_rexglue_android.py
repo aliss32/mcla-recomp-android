@@ -2,6 +2,10 @@
 """
 Applies Android-only compatibility patches to the pinned ReXGlue SDK after
 the MCLA-specific SDK patch has been applied.
+
+This script also can extract new files from the Android UI patch (.patch)
+and write them into the SDK checkout when git apply fails or the patch can't
+be applied cleanly by the runner.
 """
 import os
 import re
@@ -93,9 +97,78 @@ def insert_android_elseif_after_apple(ui_content):
     return new_content, True
 
 
+def extract_new_files_from_patch(patch_path, sdk_dir):
+    """Extract new-file hunks from a unified diff patch and write those files into sdk_dir.
+
+    This is intentionally tolerant: it only creates files where the original path
+    was /dev/null (i.e., new files in the patch). It ignores modified-file hunks.
+    """
+    if not os.path.exists(patch_path):
+        print(f"[WARN] patch file not found: {patch_path}")
+        return False
+    with open(patch_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    i = 0
+    created = []
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('diff --git'):
+            # look ahead for --- and +++ lines
+            j = i + 1
+            old_path = None
+            new_path = None
+            is_new = False
+            while j < len(lines) and not lines[j].startswith('diff --git'):
+                l = lines[j]
+                if l.startswith('--- '):
+                    old_path = l.strip().split(' ', 1)[1]
+                if l.startswith('+++ '):
+                    new_path = l.strip().split(' ', 1)[1]
+                j += 1
+            # normalize
+            if old_path == '/dev/null' and new_path and new_path.startswith('b/'):
+                rel = new_path[2:]
+                # now collect hunk content between i and next diff
+                content_lines = []
+                k = i + 1
+                in_hunk = False
+                while k < len(lines) and not lines[k].startswith('diff --git'):
+                    if lines[k].startswith('@@'):
+                        in_hunk = True
+                    elif in_hunk:
+                        if lines[k].startswith('+') and not lines[k].startswith('+++'):
+                            content_lines.append(lines[k][1:])
+                        # ignore '-' lines (no original content) and ' ' context lines (shouldn't occur for new files)
+                    k += 1
+                # write file if there is content
+                if content_lines:
+                    dest = os.path.join(sdk_dir, rel)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with open(dest, 'w', encoding='utf-8') as out:
+                        out.writelines(content_lines)
+                    created.append(rel)
+                    print(f"[OK] Extracted new file from patch: {rel}")
+                i = k
+                continue
+        i += 1
+    if not created:
+        print('[INFO] No new files extracted from patch')
+    return True
+
+
 def main():
     sdk_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rexglue-sdk"
+    patch_path = sys.argv[2] if len(sys.argv) > 2 else None
     print(f"Applying Android patches to ReXGlue SDK at: {sdk_dir}")
+
+    # If a patch file was given, try to extract any new files from it into the SDK
+    # This helps when git apply fails due to upstream context differences.
+    if patch_path:
+        try:
+            extract_new_files_from_patch(patch_path, sdk_dir)
+        except Exception as e:
+            print(f"[WARN] Failed to extract new files from patch: {e}")
 
     # 1. UI CMakeLists: Disable X11 / Wayland on Android
     ui_cmake = os.path.join(sdk_dir, "src", "ui", "CMakeLists.txt")
