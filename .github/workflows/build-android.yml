@@ -1,5 +1,8 @@
 name: Build MCLA Android APK (Vulkan & Turnip Driver Support)
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main, master ]
@@ -21,63 +24,56 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install NDK r27c (Clang 18)
-        run: |
-          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;27.2.12479018"
-          echo "ANDROID_NDK=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
 
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK r27c (Clang 18)
+        run: sdkmanager "ndk;27.2.12479018"
+      - name: Configure Android environment
+        run: echo "ANDROID_NDK=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
       - name: Install build tools
-        run: sudo apt-get install -y ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
       - name: Clone and Build SDL3
         run: |
           git clone --depth=1 --branch release-3.2.14 https://github.com/libsdl-org/SDL.git /tmp/SDL3
           cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
             -DANDROID_STL=c++_shared \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF \
             -DCMAKE_INSTALL_PREFIX=/tmp/sdl3-prefix \
             -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/SDL3-build --parallel $(nproc)
+          cmake --build /tmp/SDL3-build --parallel "$(nproc)"
           cmake --install /tmp/SDL3-build
           mkdir -p app/src/main/jniLibs/arm64-v8a
           cp /tmp/SDL3-build/libSDL3.so app/src/main/jniLibs/arm64-v8a/
-          echo "SDL3_DIR=/tmp/sdl3-prefix/lib/cmake/SDL3" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=/tmp/sdl3-prefix" >> $GITHUB_ENV
-
+          echo "SDL3_DIR=/tmp/sdl3-prefix/lib/cmake/SDL3" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=/tmp/sdl3-prefix" >> "$GITHUB_ENV"
       - name: Stage libc++_shared.so
         run: |
-          cp $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so \
+          cp "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
              app/src/main/jniLibs/arm64-v8a/
-
       - name: Sync SDL3 Java wrappers
         run: |
           rm -rf app/src/main/sdl_java
           mkdir -p app/src/main/sdl_java
           cp -r /tmp/SDL3/android-project/app/src/main/java/* app/src/main/sdl_java/
-
       - name: Setup ReXGlue SDK
         run: |
           git clone https://github.com/rexglue/rexglue-sdk.git /tmp/rexglue-sdk
-          cd /tmp/rexglue-sdk
-          git checkout f5337cdc947ff6d4c4196737e2c807a48f2a1fc2
-          git submodule update --init --recursive
-          git apply $GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-v0.10.0-mcla.patch
-          git apply $GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-minmax-blend-factor.patch
-          python3 $GITHUB_WORKSPACE/scripts/patch_rexglue_android.py /tmp/rexglue-sdk
-          echo "REXSDK_DIR=/tmp/rexglue-sdk" >> $GITHUB_ENV
-
+          git -C /tmp/rexglue-sdk checkout f5337cdc947ff6d4c4196737e2c807a48f2a1fc2
+          git -C /tmp/rexglue-sdk submodule update --init --recursive
+          git -C /tmp/rexglue-sdk apply "$GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-v0.10.0-mcla.patch"
+          git -C /tmp/rexglue-sdk apply "$GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-minmax-blend-factor.patch"
+          python3 "$GITHUB_WORKSPACE/scripts/patch_rexglue_android.py" /tmp/rexglue-sdk
+          echo "REXSDK_DIR=/tmp/rexglue-sdk" >> "$GITHUB_ENV"
       - name: Grant permissions
         run: chmod +x gradlew scripts/*.sh
-
       - name: Build driver proxy
         run: bash -euxo pipefail scripts/build_driver_proxy.sh
-
       - name: Build MCLA native (libmain.so)
         run: bash -euxo pipefail scripts/build_native.sh
-
       - name: Verify staged libraries
         run: |
           echo "Checking staged libraries in jniLibs/arm64-v8a:"
@@ -86,10 +82,8 @@ jobs:
           test -f app/src/main/jniLibs/arm64-v8a/libSDL3.so || { echo "libSDL3.so missing!"; exit 1; }
           test -f app/src/main/jniLibs/arm64-v8a/librexruntime.so || { echo "librexruntime.so missing!"; exit 1; }
           test -f app/src/main/jniLibs/arm64-v8a/librexgpu-xenos.so || { echo "librexgpu-xenos.so missing!"; exit 1; }
-
       - name: Assemble APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
-
       - uses: actions/upload-artifact@v4
         with:
           name: MCLA-Android-Vulkan-Turnip-Debug
