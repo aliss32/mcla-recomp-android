@@ -250,43 +250,54 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
         'Define REX_PLATFORM_ANDROID in platform.h'
     )
 
-    # 8. Fallback guard: if a rexglue-sdk revision hardcodes the robust-mutex
-    #    block without checking REX_PLATFORM_ANDROID, disable the bionic calls in
-    #    threading_posix.cpp so the Android NDK build compiles.
-    # 8b. memory_posix.cpp calls rex::GetAndroidApiLevel() but does not include
-    #     the helper header. Add the include so the declaration is visible.
-    memory_posix = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
-    patch_file(
-        memory_posix,
-        '#include <rex/platform.h>',
-        '#include <rex/platform.h>\n#include <rex/main_android.h>',
-        'Include Android API-level helper in memory_posix.cpp'
-    )
+    # 8. Bionic does not consistently expose robust-mutex APIs. Exclude Android
+    #    from all Linux robust-mutex paths so no pthread_mutex_consistent symbol
+    #    is referenced; Android uses the existing portable std::mutex paths.
     threading_posix = os.path.join(sdk_dir, "src", "core", "threading_posix.cpp")
-    patch_file(
-        threading_posix,
-        '      if (pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST) == 0) {',
-        '#if !defined(__ANDROID__)\n'
-        '      if (pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST) == 0) {',
-        'Guard pthread_mutexattr_setrobust() out on Android'
+    if not os.path.exists(threading_posix):
+        print(f"[ERROR] File not found: {threading_posix}")
+        return 1
+    with open(threading_posix, 'r', encoding='utf-8') as f:
+        threading_content = f.read().replace('\r\n', '\n')
+
+    replacements = (
+        (
+            '#if REX_PLATFORM_LINUX\n    // Use robust mutexes so waits can recover if owner thread terminates.',
+            '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n    // Use robust mutexes so waits can recover if owner thread terminates.',
+            'robust-mutex initialization',
+        ),
+        (
+            '    auto predicate = [this] { return this->signaled(); };\n'
+            '#if REX_PLATFORM_LINUX\n'
+            '    auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());',
+            '    auto predicate = [this] { return this->signaled(); };\n'
+            '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n'
+            '    auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());',
+            'Wait robust-mutex recovery',
+        ),
+        (
+            '      for (size_t i = 0; i < handles.size(); ++i) {\n'
+            '#if REX_PLATFORM_LINUX\n'
+            '        auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());',
+            '      for (size_t i = 0; i < handles.size(); ++i) {\n'
+            '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n'
+            '        auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());',
+            'WaitMultiple robust-mutex recovery',
+        ),
     )
-    patch_file(
-        threading_posix,
-        '      pthread_mutexattr_destroy(&attr);\n',
-        '      pthread_mutexattr_destroy(&attr);\n'
-        '#endif  // !defined(__ANDROID__)\n',
-        'Close Android guard for pthread_mutexattr_setrobust()'
-    )
-    patch_file(
-        threading_posix,
-        '      pthread_mutex_consistent(native_mutex);',
-        '#if !defined(__ANDROID__)\n'
-        '      pthread_mutex_consistent(native_mutex);\n'
-        '#endif',
-        'Guard pthread_mutex_consistent() out on Android'
-    )
+    for old_text, new_text, description in replacements:
+        if new_text in threading_content:
+            print(f"[SKIP] Already Android-safe: {description}")
+        elif old_text in threading_content:
+            threading_content = threading_content.replace(old_text, new_text, 1)
+            print(f"[OK] Disabled Android robust-mutex path: {description}")
+        else:
+            print(f"[ERROR] Could not locate expected {description} block in threading_posix.cpp")
+            return 1
+    with open(threading_posix, 'w', encoding='utf-8') as f:
+        f.write(threading_content)
 
     print("Android patching completed.")
-
+    return 0
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
