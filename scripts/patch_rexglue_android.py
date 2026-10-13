@@ -7,6 +7,7 @@ import os
 import re
 import sys
 
+
 def patch_file(filepath, old_text, new_text, description):
     if not os.path.exists(filepath):
         print(f"[WARN] File not found: {filepath}")
@@ -26,6 +27,7 @@ def patch_file(filepath, old_text, new_text, description):
         print(f"[WARN] Target text not found in {os.path.basename(filepath)}: {description}")
         return False
 
+
 def patch_file_regex(filepath, pattern, replacement, description):
     if not os.path.exists(filepath):
         print(f"[WARN] File not found: {filepath}")
@@ -41,6 +43,7 @@ def patch_file_regex(filepath, pattern, replacement, description):
     else:
         print(f"[WARN] Regex pattern not found in {os.path.basename(filepath)}: {description}")
         return False
+
 
 def main():
     sdk_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rexglue-sdk"
@@ -91,7 +94,7 @@ def main():
         print(f"[ERROR] Required SDL window source is missing: {window_sdl}")
         return 1
     with open(window_sdl, 'r', encoding='utf-8') as f:
-        window_content = f.read().replace('\\r\\n', '\\n')
+        window_content = f.read().replace('\r\n', '\n')
 
     x11_include_fallback = '#else\n#include <X11/Xlib-xcb.h>'
     guarded_x11_include = ('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
@@ -151,14 +154,40 @@ def main():
         'Polyfill clock_cast for Android NDK libc++'
     )
 
-    # 3. Core CMakeLists: Link dl log instead of pthread rt dl on Android
+    # 3. Core CMakeLists: Link dl log instead of pthread rt dl on Android.
+    # IMPORTANT: do not inject an extra endif() here; the surrounding CMake file
+    # already owns the closing endif() for the if/elseif chain.
     core_cmake = os.path.join(sdk_dir, "src", "core", "CMakeLists.txt")
-    patch_file(
-        core_cmake,
-        'if(UNIX)\n    target_link_libraries(rexcore PRIVATE pthread rt dl)',
-        'if(ANDROID)\n    target_link_libraries(rexcore PRIVATE dl log)\nelse()\n    target_link_libraries(rexcore PRIVATE pthread rt dl)\nendif()',
-        'Link dl log to rexcore on Android (no librt.so)'
-    )
+    core_old = 'elseif(UNIX)\n    target_link_libraries(rexcore PRIVATE pthread rt dl)'
+    core_new = ('elseif(ANDROID)\n'
+                '    target_link_libraries(rexcore PRIVATE dl log)\n'
+                'else()\n'
+                '    target_link_libraries(rexcore PRIVATE pthread rt dl)')
+    if os.path.exists(core_cmake):
+        with open(core_cmake, 'r', encoding='utf-8') as f:
+            core_content = f.read().replace('\r\n', '\n')
+        if core_new in core_content:
+            print('[SKIP] Android core link patch already present')
+        elif core_old in core_content:
+            core_content = core_content.replace(core_old, core_new, 1)
+            with open(core_cmake, 'w', encoding='utf-8') as f:
+                f.write(core_content)
+            print('[OK] Patched core CMakeLists without adding a redundant endif()')
+        else:
+            # Compatibility fallback for the older unguarded variant.
+            legacy_old = 'if(UNIX)\n    target_link_libraries(rexcore PRIVATE pthread rt dl)'
+            legacy_new = ('if(ANDROID)\n'
+                          '    target_link_libraries(rexcore PRIVATE dl log)\n'
+                          'else()\n'
+                          '    target_link_libraries(rexcore PRIVATE pthread rt dl)')
+            if legacy_old in core_content:
+                core_content = core_content.replace(legacy_old, legacy_new, 1)
+                with open(core_cmake, 'w', encoding='utf-8') as f:
+                    f.write(core_content)
+                print('[OK] Patched legacy core CMakeLists path without adding a redundant endif()')
+            else:
+                print('[WARN] Core CMakeLists link block not found for Android patch')
+                return 1
 
     # 4. Numeric: Add Android to portable_float_from_chars preprocessor guard
     #    Android NDK libc++ lacks float std::from_chars. The SDK already has a
@@ -197,8 +226,8 @@ def main():
     )
     patch_file(
         fiber_h,
-        '#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fiber_ = false;\n\n  static void Trampoline();\n#endif',
-        '#elif REX_PLATFORM_LINUX && !defined(__ANDROID__)\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fiber_ = false;\n\n  static void Trampoline();\n#elif REX_PLATFORM_ANDROID\n  bool is_thread_fiber_ = false;\n#endif',
+        '#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fibe',
+        '#elif REX_PLATFORM_LINUX && !defined(__ANDROID__)\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fibe',
         'Use thread-fiber member on Android'
     )
 
@@ -229,13 +258,13 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
   (void)stack_size;
   (void)entry;
   (void)arg;
-  std::fputs("rex::thread::Fiber::Create is not implemented on Android\\n", stderr);
+  std::fputs("rex::thread::Fiber::Create is not implemented on Android\n", stderr);
   return nullptr;
 }
 
 void Fiber::SwitchTo(Fiber* target) {
   (void)target;
-  std::fputs("rex::thread::Fiber::SwitchTo is not implemented on Android\\n", stderr);
+  std::fputs("rex::thread::Fiber::SwitchTo is not implemented on Android\n", stderr);
   std::abort();
 }
 
@@ -371,5 +400,7 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
 
     print("Android patching completed.")
     return 0
+
+
 if __name__ == "__main__":
     sys.exit(main())
