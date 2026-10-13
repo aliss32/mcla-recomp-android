@@ -198,49 +198,79 @@ void Fiber::Destroy() {
         'Close Android #if in fiber_posix.cpp'
     )
 
-    # 6. Android helpers: supply the header required by the Android POSIX
-    #    threading backend and expose the runtime API-level query.
+    # 6. main_android.h: the Android POSIX threading backend
+    #    (src/core/threading_posix.cpp) includes <rex/main_android.h>.
+    #    Generate that header inside the SDK include tree so the include resolves.
+    #    Do NOT redeclare GetAndroidApiLevel() in platform.h: the rex sources
+    #    already define it elsewhere and adding a second definition there causes a
+    #    'redefinition of GetAndroidApiLevel' error in Android translation units.
     main_android_h = os.path.join(sdk_dir, "include", "rex", "main_android.h")
     platform_h = os.path.join(sdk_dir, "include", "rex", "platform.h")
     main_android_contents = '''#ifndef REX_MAIN_ANDROID_H_
 #define REX_MAIN_ANDROID_H_
-#include <cstdint>
+
 #if defined(__ANDROID__)
+
 #include <android/api-level.h>
-#endif
-namespace rex {
-inline int32_t GetAndroidApiLevel() {
-#if defined(__ANDROID__)
-  return android_get_device_api_level();
-#else
-  return 0;
-#endif
-}
-}  // namespace rex
+
+#endif  // defined(__ANDROID__)
+
 #endif  // REX_MAIN_ANDROID_H_
 '''
-    if os.path.exists(platform_h):
-        with open(platform_h, "r", encoding="utf-8") as f:
-            platform_content = f.read()
-        if "GetAndroidApiLevel" not in platform_content:
-            platform_marker = "#ifndef REX_PLATFORM_LINUX\n#define REX_PLATFORM_LINUX 0\n#endif"
-            if platform_marker in platform_content:
-                platform_content = platform_content.replace(
-                    platform_marker,
-                    platform_marker + "\n#if REX_PLATFORM_ANDROID\n#include <android/api-level.h>\nnamespace rex {\ninline int GetAndroidApiLevel() {\n  return android_get_device_api_level();\n}\n}  // namespace rex\n#endif",
-                    1,
-                )
-                with open(platform_h, "w", encoding="utf-8") as f:
-                    f.write(platform_content)
-                print("[OK] Added Android API-level declaration to include/rex/platform.h")
-            else:
-                print("[WARN] Could not locate platform macro marker for GetAndroidApiLevel")
     if os.path.exists(main_android_h):
         print("[SKIP] Android helper header already exists: include/rex/main_android.h")
     else:
         os.makedirs(os.path.dirname(main_android_h), exist_ok=True)
         with open(main_android_h, 'w', encoding='utf-8') as f:
             f.write(main_android_contents)
+        print("[OK] Added include/rex/main_android.h required by Android threading backend")
+
+    # 7. Bionic (Android libc) has no robust mutexes: PTHREAD_MUTEX_ROBUST,
+    #    pthread_mutexattr_setrobust() and pthread_mutex_consistent() do not
+    #    exist there. The SDK guards those calls behind
+    #    'REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID', so on Android the guard
+    #    only works if platform.h actually defines REX_PLATFORM_ANDROID.
+    platform_android_guard = '''#ifndef REX_PLATFORM_ANDROID
+#define REX_PLATFORM_ANDROID 0
+#endif
+#if defined(__ANDROID__)
+#undef REX_PLATFORM_ANDROID
+#define REX_PLATFORM_ANDROID 1
+#endif'''
+    patch_file(
+        platform_h,
+        '#ifndef REX_PLATFORM_LINUX\n#define REX_PLATFORM_LINUX 0\n#endif',
+        '#ifndef REX_PLATFORM_LINUX\n#define REX_PLATFORM_LINUX 0\n#endif\n' + platform_android_guard,
+        'Define REX_PLATFORM_ANDROID in platform.h'
+    )
+
+    # 8. Fallback guard: if a rexglue-sdk revision hardcodes the robust-mutex
+    #    block without checking REX_PLATFORM_ANDROID, disable the bionic calls in
+    #    threading_posix.cpp so the Android NDK build compiles.
+    threading_posix = os.path.join(sdk_dir, "src", "core", "threading_posix.cpp")
+    patch_file(
+        threading_posix,
+        '      if (pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST) == 0) {',
+        '#if !defined(__ANDROID__)\n'
+        '      if (pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST) == 0) {',
+        'Guard pthread_mutexattr_setrobust() out on Android'
+    )
+    patch_file(
+        threading_posix,
+        '      pthread_mutexattr_destroy(&attr);\n',
+        '      pthread_mutexattr_destroy(&attr);\n'
+        '#endif  // !defined(__ANDROID__)\n',
+        'Close Android guard for pthread_mutexattr_setrobust()'
+    )
+    patch_file(
+        threading_posix,
+        '      pthread_mutex_consistent(native_mutex);',
+        '#if !defined(__ANDROID__)\n'
+        '      pthread_mutex_consistent(native_mutex);\n'
+        '#endif',
+        'Guard pthread_mutex_consistent() out on Android'
+    )
+
     print("Android patching completed.")
 
 if __name__ == "__main__":
