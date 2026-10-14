@@ -121,6 +121,20 @@ public class LauncherActivity extends Activity {
                 refreshInstall();
             });
         }, "InstallerLoad").start();
+        // First launch: ask for all-files access up front so the game can
+        // read default.xex from anywhere (Download, SD card) without the
+        // player hitting EACCES inside the emulator with no dialog shown.
+        if (savedInstanceState == null && !Installer.hasFileAccess(this)) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow file access")
+                    .setMessage("Midnight Club: LA Recompiled needs access to all files to read "
+                            + "the game data (default.xex) from Downloads or an SD card.\n\n"
+                            + "Enable \"Allow access to manage all files\" on the next screen, "
+                            + "then come back.")
+                    .setCancelable(false)
+                    .setPositiveButton("Open setting", (d, w) -> Installer.requestFileAccess(this, 1))
+                    .show();
+        }
         // `am start ... --ez play true` (the development scripts) goes
         // straight into the game with the current driver choice.
         if (savedInstanceState == null && getIntent().getBooleanExtra("play", false)) play(false);
