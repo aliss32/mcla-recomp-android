@@ -46,7 +46,63 @@ def main():
     sdk_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rexglue-sdk"
     print(f"Applying Android patches to ReXGlue SDK at: {sdk_dir}")
 
-    # 1. UI CMakeLists: Disable X11 / Wayland on Android
+    # 1a. windowed_app.h: keep the single-app creator path on Android.
+    #     The pinned SDK enables XE_UI_WINDOWED_APPS_IN_LIBRARY on Android,
+    #     which removes rex::ui::GetWindowedAppCreator() that the SDL entry
+    #     point (windowed_app_main_sdl.cpp) calls. Android hosts a single SDL
+    #     app through SDLActivity exactly like the desktop executables, so
+    #     library mode is not used (same approach as LibertyRecompAndroid).
+    #     main() on Android is renamed to SDL_main via <SDL3/SDL_main.h>, which
+    #     libmain.so exports for SDLActivity.
+    windowed_app_h = os.path.join(sdk_dir, "include", "rex", "ui", "windowed_app.h")
+    if not os.path.exists(windowed_app_h):
+        print(f"[ERROR] Required header is missing: {windowed_app_h}")
+        return 1
+    with open(windowed_app_h, 'r', encoding='utf-8') as f:
+        wah_content = f.read().replace('\r\n', '\n')
+    if 'XE_UI_WINDOWED_APPS_IN_LIBRARY 1' in wah_content:
+        define_old = '#define XE_UI_WINDOWED_APPS_IN_LIBRARY 1'
+        define_new = ('// Android hosts the single SDL application through SDLActivity, exactly\n'
+                      '// like the desktop executables; multi-app library mode is not used.\n'
+                      '// #define XE_UI_WINDOWED_APPS_IN_LIBRARY 1')
+        if define_old in wah_content:
+            wah_content = wah_content.replace(define_old, define_new, 1)
+            with open(windowed_app_h, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(wah_content)
+            print('[OK] Patched windowed_app.h: keep GetWindowedAppCreator on Android (disable library mode)')
+        else:
+            print('[ERROR] windowed_app.h: XE_UI_WINDOWED_APPS_IN_LIBRARY define anchor not found')
+            return 1
+    else:
+        print('[SKIP] windowed_app.h: library mode already disabled on Android')
+
+    # 1b. windowed_app_main_sdl.cpp: rename main to SDL_main on Android so
+    #     SDLActivity resolves the entry point in libmain.so.
+    app_main_sdl = os.path.join(sdk_dir, "src", "ui", "windowed_app_main_sdl.cpp")
+    if os.path.exists(app_main_sdl):
+        with open(app_main_sdl, 'r', encoding='utf-8') as f:
+            am_content = f.read().replace('\r\n', '\n')
+        if 'SDL3/SDL_main.h' in am_content:
+            print('[SKIP] windowed_app_main_sdl.cpp: SDL_main rename already present')
+        else:
+            main_old = 'int main(int argc, char* argv[]) {'
+            main_new = ('#if REX_PLATFORM_ANDROID\n'
+                        '// Renames main to SDL_main, which SDLActivity resolves in libmain.so.\n'
+                        '#include <SDL3/SDL_main.h>\n'
+                        '#endif\n'
+                        'int main(int argc, char* argv[]) {')
+            if main_old in am_content:
+                am_content = am_content.replace(main_old, main_new, 1)
+                with open(app_main_sdl, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write(am_content)
+                print('[OK] Patched windowed_app_main_sdl.cpp: main -> SDL_main on Android')
+            else:
+                print('[ERROR] windowed_app_main_sdl.cpp: main() anchor not found')
+                return 1
+    else:
+        print('[WARN] windowed_app_main_sdl.cpp not found; skipping SDL_main rename')
+
+    # 1c. UI CMakeLists: Disable X11 / Wayland on Android
     ui_cmake = os.path.join(sdk_dir, "src", "ui", "CMakeLists.txt")
     patch_file(
         ui_cmake,
