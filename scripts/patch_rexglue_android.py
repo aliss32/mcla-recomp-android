@@ -186,6 +186,37 @@ def main():
     else:
         print('[WARN] rex_app.cpp not found; skipping log dir patch')
 
+    # 1b-3. logging.cpp: catch every call site. NextSequentialLogPath falls back
+    #     to current_path()/logs when log_dir is empty, and the SDL thread's
+    #     working directory on Android is /system/bin (read-only) - any
+    #     InitLogging caller that does not set log_dir aborts the game there.
+    #     On Android default the empty log_dir to the user folder instead.
+    logging_cpp = os.path.join(sdk_dir, "src", "core", "logging.cpp")
+    if os.path.exists(logging_cpp):
+        with open(logging_cpp, 'r', encoding='utf-8') as f:
+            log_content = f.read().replace('\r\n', '\n')
+        old_line = 'auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"'
+        if 'REX_ANDROID_LOG_DIR_FALLBACK' in log_content:
+            print('[SKIP] logging.cpp: Android log dir fallback already present')
+        elif old_line in log_content:
+            new_line = ('#ifdef __ANDROID__\n'
+                        '    // The SDL thread\'s working directory is read-only (/system/bin);\n'
+                        '    // an empty log_dir must not resolve there. (REX_ANDROID_LOG_DIR_FALLBACK)\n'
+                        '    auto log_dir = config.log_dir.empty() ? rex::filesystem::GetUserFolder() / "logs"'
+                        )
+            log_content = log_content.replace(old_line, new_line, 1)
+            # Make sure GetUserFolder is declared.
+            if '#include <rex/filesystem.h>' not in log_content:
+                log_content = log_content.replace('#include <rex/platform/env.h>',
+                                                  '#include <rex/platform/env.h>\n#include <rex/filesystem.h>', 1)
+            with open(logging_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(log_content)
+            print('[OK] Patched logging.cpp: empty log_dir falls back to the user folder on Android')
+        else:
+            print('[WARN] logging.cpp: log_dir fallback anchor not found')
+    else:
+        print('[WARN] logging.cpp not found; skipping log dir fallback patch')
+
     # 1c. UI CMakeLists: Disable X11 / Wayland on Android
     ui_cmake = os.path.join(sdk_dir, "src", "ui", "CMakeLists.txt")
     patch_file(
