@@ -14,6 +14,28 @@
 REXCVAR_DEFINE_STRING(mcla_gpu_backend, "any", "MCLA",
                       "Graphics backend for the Xenos GPU plugin: any, vulkan or d3d12");
 
+// The runtime's rotating log must never land beside the executable: on Android
+// that is /system/bin (read-only), and create_directories there aborts the
+// game right after SDL_main starts. Set the log file explicitly so the SDK's
+// exe_dir/logs fallback in rex_app.cpp never runs (the same approach as
+// Pinyon Shift's OnConfigurePaths, which pins log_file to its state root).
+void ConfigureWritableLogFile(const rex::PathConfig& paths) {
+  if (!REXCVAR_GET(log_file).empty()) {
+    return;
+  }
+  std::filesystem::path base = paths.user_data_root;
+  if (base.empty()) {
+    base = rex::filesystem::GetUserFolder() / "MclaRecomp";
+  }
+  std::error_code error;
+  std::filesystem::create_directories(base / "logs", error);
+  if (error) {
+    // Nothing writable found; leave the SDK default rather than crash here.
+    return;
+  }
+  REXCVAR_SET(log_file, (base / "logs" / "runtime.log").string());
+}
+
 
 std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
     rex::runtime::FunctionDispatcher* function_dispatcher);
@@ -69,6 +91,13 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
     }
     folder = folder.parent_path();
   }
+
+  // The log file is pinned here, after the game root was resolved, so every
+  // platform (Android included) writes it under a directory the process can
+  // create files in. user_data_root defaults to GetUserFolder()/GetName()
+  // in the SDK (XDG_DATA_HOME, which the Android launcher sets to its
+  // external files dir).
+  ConfigureWritableLogFile(paths);
 }
 
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
