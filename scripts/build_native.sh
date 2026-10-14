@@ -38,8 +38,9 @@ cmake --build "$BUILD_DIR" --target mcla rexgpu-xenos -- -j"$JOBS"
 echo "== Staging native libraries"
 cp "$NDK_SYSROOT_LIB/libc++_shared.so" "$JNILIBS/"
 
-# Find and stage all output .so files into jniLibs
-find "$BUILD_DIR" -name "*.so" -exec cp -f {} "$JNILIBS/" \;
+# Find and stage all output .so files into jniLibs (the SDK links its shared
+# libs into $REXSDK_DIR/out, outside $BUILD_DIR)
+find "$BUILD_DIR" "$REXSDK_DIR/out" -name "*.so" -exec cp -f {} "$JNILIBS/" \;
 
 echo "== Native staging completed"
 ls -la "$JNILIBS"

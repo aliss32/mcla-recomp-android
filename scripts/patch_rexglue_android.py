@@ -46,6 +46,42 @@ def main():
     sdk_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rexglue-sdk"
     print(f"Applying Android patches to ReXGlue SDK at: {sdk_dir}")
 
+    # 1. Root CMakeLists: clear library config postfixes on Android.
+    #     SDLActivity loads libraries by fixed name (libSDL3.so, libmain.so,
+    #     librexruntime.so, librexgpu-xenos.so). RelWithDebInfo would name them
+    #     librexruntimerd.so / librexgpu-xenosrd.so (same approach as
+    #     LibertyRecompAndroid).
+    sdk_cmake = os.path.join(sdk_dir, "CMakeLists.txt")
+    if not os.path.exists(sdk_cmake):
+        print(f"[ERROR] Required CMakeLists is missing: {sdk_cmake}")
+        return 1
+    with open(sdk_cmake, 'r', encoding='utf-8') as f:
+        sdk_cmake_content = f.read().replace('\r\n', '\n')
+    if 'if(ANDROID)\n    # SDLActivity loads libraries by fixed name' in sdk_cmake_content:
+        print('[SKIP] CMakeLists.txt: Android postfix override already present')
+    else:
+        postfix_old = ('set(CMAKE_CXX_EXTENSIONS OFF)\n'
+                       'set(CMAKE_DEBUG_POSTFIX d)\n'
+                       'set(CMAKE_RELWITHDEBINFO_POSTFIX rd)')
+        postfix_new = ('set(CMAKE_CXX_EXTENSIONS OFF)\n'
+                       'if(ANDROID)\n'
+                       '    # SDLActivity loads libraries by fixed name\n'
+                       '    # (libSDL3.so, libmain.so, librexruntime.so, librexgpu-xenos.so).\n'
+                       '    set(CMAKE_DEBUG_POSTFIX "")\n'
+                       '    set(CMAKE_RELWITHDEBINFO_POSTFIX "")\n'
+                       'else()\n'
+                       '    set(CMAKE_DEBUG_POSTFIX d)\n'
+                       '    set(CMAKE_RELWITHDEBINFO_POSTFIX rd)\n'
+                       'endif()')
+        if postfix_old in sdk_cmake_content:
+            sdk_cmake_content = sdk_cmake_content.replace(postfix_old, postfix_new, 1)
+            with open(sdk_cmake, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(sdk_cmake_content)
+            print('[OK] Patched CMakeLists.txt: clear config postfixes on Android')
+        else:
+            print('[ERROR] CMakeLists.txt: postfix anchor not found')
+            return 1
+
     # 1a. windowed_app.h: keep the single-app creator path on Android.
     #     The pinned SDK enables XE_UI_WINDOWED_APPS_IN_LIBRARY on Android,
     #     which removes rex::ui::GetWindowedAppCreator() that the SDL entry
