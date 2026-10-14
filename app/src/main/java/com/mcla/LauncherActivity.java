@@ -920,7 +920,7 @@ public class LauncherActivity extends Activity {
     String savedGameDir() {
         String saved = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .getString(PREF_GAME_DIR, null);
-        if (saved == null) return null;
+        if (saved == null || saved.startsWith("content://")) return null;
         // The picker may have been pointed at the parent of the game folder
         // (e.g. Download/mcla-recomp-v1.0.1); drop down to the "game"
         // subfolder that holds default.xex when only that layout applies.
