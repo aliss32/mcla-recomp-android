@@ -490,6 +490,52 @@ class AndroidNativeWindowSurface final : public Surface {
         'Link libandroid.so to rexui'
     )
 
+    # 2b. The mcla patch's mapped_memory_posix.cpp OpenForAndroidContentUri
+    #     calls rex::filesystem::OpenAndroidContentFileDescriptor; provide a
+    #     stub so the Android runtime links (content:// URIs are not used by
+    #     the MCLA port, which reads from app-private storage).
+    filesystem_posix = os.path.join(sdk_dir, "src", "core", "filesystem_posix.cpp")
+    if os.path.exists(filesystem_posix):
+        with open(filesystem_posix, 'r', encoding='utf-8') as f:
+            fp_content = f.read().replace('\r\n', '\n')
+        stub = '''int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
+  REXLOG_ERROR("content:// URIs are not supported: {}", uri);
+  return -1;
+}
+#endif  // REX_PLATFORM_ANDROID
+'''
+        if 'OpenAndroidContentFileDescriptor' not in fp_content:
+            anchor = '#endif  // REX_PLATFORM_ANDROID'
+            if anchor in fp_content:
+                fp_content = fp_content.replace(anchor, stub, 1)
+                print('[OK] OpenAndroidContentFileDescriptor stub added to filesystem_posix.cpp')
+            else:
+                # No Android block yet; add one guarded before the closing namespace.
+                anchor = '}  // namespace filesystem'
+                guarded = '''#if REX_PLATFORM_ANDROID
+bool IsAndroidContentUri(const std::string_view source) {
+  return source.starts_with("content://");
+}
+int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
+  REXLOG_ERROR("content:// URIs are not supported: {}", uri);
+  return -1;
+}
+#endif  // REX_PLATFORM_ANDROID
+
+'''
+                if anchor not in fp_content:
+                    print('[ERROR] filesystem_posix.cpp namespace anchor not found')
+                    return 1
+                fp_content = fp_content.replace(anchor, guarded + anchor, 1)
+                print('[OK] OpenAndroidContentFileDescriptor stub (guarded block) added to filesystem_posix.cpp')
+            with open(filesystem_posix, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(fp_content)
+        else:
+            print('[SKIP] filesystem_posix.cpp already has OpenAndroidContentFileDescriptor')
+    else:
+        print('[ERROR] filesystem_posix.cpp not found')
+        return 1
+
     # 2. Chrono: Polyfill clock_cast on Android libc++
     chrono_h = os.path.join(sdk_dir, "include", "rex", "chrono", "chrono.h")
     patch_file(
