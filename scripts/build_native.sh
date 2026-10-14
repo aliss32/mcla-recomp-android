@@ -11,15 +11,9 @@ JOBS="${1:-$(( $(nproc) > 3 ? $(nproc) - 2 : 1 ))}"
 CPU_FLAGS="-march=armv8.2-a -fno-emulated-tls -fexperimental-library"
 SDL3_SRC="${SDL3_SRC:-}"
 REXSDK_DIR="${REXSDK_DIR:-/tmp/rexglue-sdk}"
-
-# Android's surface and SDL windowing changes are kept in a patch of their
-# own so the PS5 patch stays untouched; apply it to the pinned checkout once.
-ANDROID_UI_PATCH="$REPO/mcla-recomp/patches/rexglue-v0.10.0-android-ui.patch"
-if [ -d "$REXSDK_DIR/.git" ] && ! grep -q "AND NOT ANDROID" "$REXSDK_DIR/src/ui/CMakeLists.txt"; then
-  echo "== Applying Android UI patch to $REXSDK_DIR"
-  git -C "$REXSDK_DIR" apply "$ANDROID_UI_PATCH"
-fi
-
+# Android patches are applied to the pinned SDK checkout by the CI workflow via
+# scripts/patch_rexglue_android.py; for local builds run it once on $REXSDK_DIR
+# after the mcla/minmax patches.
 mkdir -p "$JNILIBS"
 
 # Configure and build MCLA native

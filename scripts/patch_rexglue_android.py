@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Applies Android-only compatibility patches to the pinned ReXGlue SDK after
-the MCLA-specific SDK patch has been applied.
+Applies Android compatibility patches to rexglue-sdk after the upstream
+PS5/MCLA patches have been applied.
 """
 import os
 import re
@@ -60,87 +60,435 @@ def main():
         '# pkg_check_modules(X11_XCB REQUIRED x11-xcb) - skipped on Android',
         'Comment out X11-XCB pkg-config check'
     )
-    # Select the Android-only surface implementation.
-    if os.path.exists(ui_cmake):
-        with open(ui_cmake, 'r', encoding='utf-8') as f:
-            ui_content = f.read()
-        android_surface_sources = ('elseif(ANDROID)\n'
-                                   '    set(REXUI_PLATFORM_SOURCES\n'
-                                   '        surface_android.cpp\n'
-                                   '    )')
-        if android_surface_sources not in ui_content:
-            platform_if = 'if(WIN32)'
-            if platform_if not in ui_content:
-                print('[ERROR] Could not locate the UI platform-source selector')
+
+    # Android must not fall through to Linux X11/Wayland UI code. Keep the
+    # native Android surface when available; guard final desktop #else fallbacks
+    # in older pinned SDK revisions explicitly.
+    window_sdl = os.path.join(sdk_dir, "src", "ui", "window_sdl.cpp")
+    if not os.path.exists(window_sdl):
+        print(f"[ERROR] Required SDL window source is missing: {window_sdl}")
+        return 1
+    with open(window_sdl, 'r', encoding='utf-8') as f:
+        window_content = f.read().replace('\r\n', '\n')
+
+    has_android_surface = (
+        'AndroidNativeWindowSurface' in window_content
+        and os.path.exists(os.path.join(sdk_dir, "include", "rex", "ui", "surface_android.h"))
+        and os.path.exists(os.path.join(sdk_dir, "src", "ui", "surface_android.cpp"))
+    )
+    if has_android_surface:
+        include_old = ('#else\n'
+                       '#include <X11/Xlib-xcb.h>\n'
+                       '#include <rex/ui/surface_gnulinux.h>')
+        include_new = ('#elif REX_PLATFORM_ANDROID\n'
+                       '#include <rex/ui/surface_android.h>\n'
+                       '#else\n'
+                       '#include <X11/Xlib-xcb.h>\n'
+                       '#include <rex/ui/surface_gnulinux.h>')
+        if include_new not in window_content:
+            if include_old not in window_content:
+                if ('#elif REX_PLATFORM_ANDROID\n#include <rex/ui/surface_android.h>'
+                        not in window_content):
+                    print('[ERROR] Android surface include anchor is missing')
+                    return 1
+            else:
+                window_content = window_content.replace(include_old, include_new, 1)
+        surface_old = '  if (allowed_types & Surface::kTypeFlag_XcbWindow)'
+        surface_new = ('#elif REX_PLATFORM_ANDROID\n'
+                       '  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow) {\n'
+                       '    auto* native_window = static_cast<ANativeWindow*>(GetNativeWindowHandle());\n'
+                       '    if (native_window) return std::make_unique<AndroidNativeWindowSurface>(native_window);\n'
+                       '  }\n'
+                       '#else\n'
+                       '  if (allowed_types & Surface::kTypeFlag_XcbWindow)')
+        if surface_new not in window_content:
+            if surface_old not in window_content:
+                print('[ERROR] Android surface exists but GNU/Linux XCB surface anchor is missing')
                 return 1
-            ui_content = ui_content.replace(platform_if, android_surface_sources + '\n' + platform_if, 1)
-            with open(ui_cmake, 'w', encoding='utf-8') as f:
-                f.write(ui_content)
-            print('[OK] Added Android-only surface source')
+            window_content = window_content.replace(surface_old, surface_new, 1)
+        if '#elif REX_PLATFORM_ANDROID\n#include <rex/ui/surface_android.h>' not in window_content:
+            print('[ERROR] Android SDL surface include was not configured')
+            return 1
+        if '#elif REX_PLATFORM_ANDROID\n  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow)' not in window_content:
+            print('[ERROR] Android SDL surface selection was not configured')
+            return 1
+        print('[OK] Android SDL surface selection precedes GNU/Linux X11 branches')
+    else:
+        linux_elif = re.compile(
+            r'(?m)^(\s*#\s*elif\s+REX_PLATFORM_GNU_LINUX)(?!\s*&&\s*!defined\(__ANDROID__\))'
+        )
+        window_content, guarded_arms = linux_elif.subn(
+            r'\1 && !defined(__ANDROID__)', window_content
+        )
+        if guarded_arms:
+            print(f"[OK] Added Android exclusion to {guarded_arms} GNU/Linux SDL branches")
+
+        # Older pinned SDKs use a final #else for X11 rather than an explicit
+        # GNU/Linux condition. Split desktop fallbacks so Android cannot select them.
+        fallback_include = '#else\n#include <X11/Xlib-xcb.h>'
+        guarded_include = ('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
+                           '#include <X11/Xlib-xcb.h>')
+        if fallback_include in window_content:
+            window_content = window_content.replace(fallback_include, guarded_include, 1)
+            print('[OK] Excluded Android from fallback X11 SDL includes')
+        if fallback_include in window_content:
+            print('[ERROR] Could not exclude Android from the fallback X11 include')
+            return 1
+
+        mac_surface_start = window_content.find(
+            '#elif REX_PLATFORM_MAC\n'
+            '  if (allowed_types & Surface::kTypeFlag_CAMetalLayer)'
+        )
+        if mac_surface_start >= 0:
+            xcb_start = window_content.find(
+                'if (allowed_types & Surface::kTypeFlag_XcbWindow)', mac_surface_start
+            )
+            surface_else = window_content.find('#else', mac_surface_start, xcb_start)
+            if xcb_start >= 0 and surface_else >= 0:
+                window_content = (window_content[:surface_else]
+                                 + '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)'
+                                 + window_content[surface_else + len('#else'):])
+                print('[OK] Excluded Android from fallback X11/Wayland SDL surface code')
+
+        if re.search(
+            r'(?m)^\s*#\s*elif\s+REX_PLATFORM_GNU_LINUX(?!\s*&&\s*!defined\(__ANDROID__\))',
+            window_content,
+        ):
+            print('[ERROR] An unguarded GNU/Linux branch remains in window_sdl.cpp')
+            return 1
+        if '#include <X11/Xlib-xcb.h>' not in window_content:
+            print('[ERROR] Expected X11 include not found; cannot verify Android exclusion')
+            return 1
+        if 'Surface::kTypeFlag_XcbWindow' not in window_content:
+            print('[ERROR] Expected XCB surface branch not found; cannot verify Android exclusion')
+            return 1
+        if ('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
+                '#include <X11/Xlib-xcb.h>' not in window_content):
+            print('[ERROR] X11 include is not guarded from Android')
+            return 1
+        if not re.search(
+            r'#elif REX_PLATFORM_GNU_LINUX && !defined\(__ANDROID__\)\s+'
+            r'SDL_PropertiesID props[\s\S]*Surface::kTypeFlag_XcbWindow',
+            window_content,
+        ):
+            print('[ERROR] X11 surface is not guarded from Android')
+            return 1
+        print('[OK] Android is excluded from GNU/Linux/X11 SDL branches; no native Android surface is available')
+
+        # Older pinned SDK revisions use generic UNIX/else CMake fallbacks for
+        # Linux UI sources and X11/Wayland dependencies. Keep Android out of
+        # those desktop-only paths as well.
+        patch_file(
+            ui_cmake,
+            'elseif(APPLE)\n    set(REXUI_PLATFORM_SOURCES\n        surface_mac.cpp\n    )\nelse()\n    set(REXUI_PLATFORM_SOURCES\n        surface_gnulinux.cpp\n    )',
+            'elseif(APPLE)\n    set(REXUI_PLATFORM_SOURCES\n        surface_mac.cpp\n    )\nelseif(ANDROID)\n    set(REXUI_PLATFORM_SOURCES)\nelse()\n    set(REXUI_PLATFORM_SOURCES\n        surface_gnulinux.cpp\n    )',
+            'Set empty REXUI_PLATFORM_SOURCES for older Android SDK revisions',
+        )
+        patch_file(
+            ui_cmake,
+            'if(UNIX AND NOT APPLE)\n    find_package(PkgConfig REQUIRED)',
+            'if(UNIX AND NOT APPLE AND NOT ANDROID)\n    find_package(PkgConfig REQUIRED)',
+            'Disable X11/Wayland pkg-config dependencies on Android',
+        )
+
+    # 1b. Android native-window surface. The mcla patch's Vulkan presenter
+    #     (src/ui/vulkan/vulkan_presenter.cpp) already includes
+    #     <rex/ui/surface_android.h> and casts to AndroidNativeWindowSurface
+    #     under REX_PLATFORM_ANDROID, so the class and its translation unit
+    #     must exist and WindowSDL must be able to create it.
+    surface_android_h = os.path.join(sdk_dir, "include", "rex", "ui", "surface_android.h")
+    surface_android_cpp = os.path.join(sdk_dir, "src", "ui", "surface_android.cpp")
+    if not os.path.exists(surface_android_h):
+        os.makedirs(os.path.dirname(surface_android_h), exist_ok=True)
+        with open(surface_android_h, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('''#pragma once
+#include <rex/ui/surface.h>
+#include <android/native_window.h>
+
+namespace rex {
+namespace ui {
+
+class AndroidNativeWindowSurface final : public Surface {
+ public:
+  // Holds its own reference: SDL releases the ANativeWindow as soon as the
+  // Java surface is destroyed (screen off, home), while the presenter may
+  // still be using this surface.
+  explicit AndroidNativeWindowSurface(ANativeWindow* window) : window_(window) {
+    if (window_) ANativeWindow_acquire(window_);
+  }
+  ~AndroidNativeWindowSurface() override {
+    if (window_) ANativeWindow_release(window_);
+  }
+  AndroidNativeWindowSurface(const AndroidNativeWindowSurface&) = delete;
+  AndroidNativeWindowSurface& operator=(const AndroidNativeWindowSurface&) = delete;
+
+  TypeIndex GetType() const override { return kTypeIndex_AndroidNativeWindow; }
+  ANativeWindow* window() const { return window_; }
+
+ protected:
+  bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override {
+    if (!window_) return false;
+    width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
+    height_out = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
+    return true;
+  }
+
+ private:
+  ANativeWindow* window_;
+};
+
+}  // namespace ui
+}  // namespace rex
+''')
+        print("[OK] Wrote include/rex/ui/surface_android.h")
+    else:
+        print("[SKIP] include/rex/ui/surface_android.h exists")
+    if not os.path.exists(surface_android_cpp):
+        os.makedirs(os.path.dirname(surface_android_cpp), exist_ok=True)
+        with open(surface_android_cpp, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('#include <rex/ui/surface_android.h>\n')
+        print("[OK] Wrote src/ui/surface_android.cpp")
+    else:
+        print("[SKIP] src/ui/surface_android.cpp exists")
+    patch_file(
+        ui_cmake,
+        'elseif(ANDROID)\n    set(REXUI_PLATFORM_SOURCES)',
+        'elseif(ANDROID)\n    set(REXUI_PLATFORM_SOURCES\n        surface_android.cpp\n    )',
+        'Build surface_android.cpp for Android'
+    )
+
+    # 1c. WindowSDL must return the ANativeWindow handle and create the
+    #     Android surface, and detach it on app background events.
+    with open(window_sdl, 'r', encoding='utf-8') as f:
+        window_content = f.read().replace('\r\n', '\n')
+    if 'SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER' not in window_content:
+        old_handle = '''void* WindowSDL::GetNativeWindowHandle() const {
+#if REX_PLATFORM_WIN32
+  if (!sdl_window_) {
+    return nullptr;
+  }
+  return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
+                                SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+#else
+  return nullptr;
+#endif
+}'''
+        new_handle = '''void* WindowSDL::GetNativeWindowHandle() const {
+  if (!sdl_window_) {
+    return nullptr;
+  }
+#if REX_PLATFORM_ANDROID
+  return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
+                                SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+#elif REX_PLATFORM_WIN32
+  return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
+                                SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+#else
+  return nullptr;
+#endif
+}'''
+        if old_handle in window_content:
+            window_content = window_content.replace(old_handle, new_handle, 1)
+            print('[OK] Android ANativeWindow handle in GetNativeWindowHandle')
+        else:
+            print('[ERROR] GetNativeWindowHandle anchor not found')
+            return 1
+    else:
+        print('[SKIP] GetNativeWindowHandle already returns the Android window')
+    if ('#elif REX_PLATFORM_ANDROID\n'
+            '  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow)' not in window_content):
+        inserted = False
+        for anchor in (
+            '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n  SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);',
+            '#else\n  SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);\n  if (allowed_types & Surface::kTypeFlag_WaylandSurface) {',
+        ):
+            android_surface = ('#elif REX_PLATFORM_ANDROID\n'
+                               '  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow) {\n'
+                               '    if (auto* native_window = static_cast<ANativeWindow*>(GetNativeWindowHandle())) {\n'
+                               '      return std::make_unique<AndroidNativeWindowSurface>(native_window);\n'
+                               '    }\n'
+                               '  }\n')
+            if anchor in window_content:
+                if anchor.startswith('#else'):
+                    # Split the desktop #else: Android gets its own arm, and
+                    # the remaining Wayland/X11 code stays GNU/Linux-only.
+                    android_surface += '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
+                    window_content = window_content.replace(anchor, android_surface + anchor[len('#else\n'):], 1)
+                else:
+                    window_content = window_content.replace(anchor, android_surface + anchor, 1)
+                inserted = True
+                print('[OK] Android surface creation in CreateSurfaceImpl')
+                break
+        if not inserted:
+            print('[ERROR] CreateSurfaceImpl GNU/Linux anchor not found')
+            return 1
+    else:
+        print('[SKIP] CreateSurfaceImpl already handles Android')
+    if '#include <rex/ui/surface_android.h>' not in window_content:
+        inserted = False
+        for anchor, replacement in (
+            ('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n#include <X11/Xlib-xcb.h>',
+             '#elif REX_PLATFORM_ANDROID\n#include <rex/ui/surface_android.h>\n'
+             '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n#include <X11/Xlib-xcb.h>'),
+            ('#else\n#include <X11/Xlib-xcb.h>\n#include <rex/ui/surface_gnulinux.h>\n#endif',
+             '#elif REX_PLATFORM_ANDROID\n#include <rex/ui/surface_android.h>\n'
+             '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
+             '#include <X11/Xlib-xcb.h>\n#include <rex/ui/surface_gnulinux.h>\n#endif'),
+        ):
+            if anchor in window_content:
+                window_content = window_content.replace(anchor, replacement, 1)
+                inserted = True
+                print('[OK] surface_android.h included in window_sdl.cpp')
+                break
+        if not inserted:
+            print('[ERROR] window_sdl.cpp include anchor not found')
+            return 1
+    else:
+        print('[SKIP] surface_android.h already included in window_sdl.cpp')
+
+    # 1d. WindowSDL header: app lifecycle handler and detached-surface flag.
+    window_sdl_h = os.path.join(sdk_dir, "include", "rex", "ui", "window_sdl.h")
+    if os.path.exists(window_sdl_h):
+        with open(window_sdl_h, 'r', encoding='utf-8') as f:
+            h_content = f.read().replace('\r\n', '\n')
+        if 'HandleAppLifecycleEvent' not in h_content:
+            anchor = '  void HandleDropEvent(SDL_Event& event);'
+            if anchor in h_content:
+                h_content = h_content.replace(
+                    anchor,
+                    '  // Android destroys the window surface when the app is backgrounded (screen\n'
+                    '  // off, home) and creates a new one on return; the presenter must follow.\n'
+                    '  void HandleAppLifecycleEvent(SDL_Event& event);\n'
+                    + anchor, 1)
+                print('[OK] HandleAppLifecycleEvent declared in window_sdl.h')
+            else:
+                print('[ERROR] window_sdl.h method anchor not found')
+                return 1
+        if 'surface_detached_' not in h_content:
+            anchor = '  SDLWindowedAppContext& sdl_app_context() const {'
+            if anchor in h_content:
+                h_content = h_content.replace(
+                    anchor,
+                    '  // Android: the presenter surface was dropped while backgrounded.\n'
+                    '  bool surface_detached_ = false;\n\n'
+                    + anchor, 1)
+                print('[OK] surface_detached_ member added to window_sdl.h')
+            else:
+                print('[ERROR] window_sdl.h member anchor not found')
+                return 1
+        with open(window_sdl_h, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(h_content)
+    else:
+        print('[ERROR] window_sdl.h not found')
+        return 1
+
+    # 1e. window_sdl.cpp: Android lifecycle handling (detach/reattach the
+    #     presenter surface around background/foreground events).
+    if 'HandleAppLifecycleEvent' not in window_content:
+        lifecycle = '''void WindowSDL::HandleAppLifecycleEvent(SDL_Event& event) {
+#if REX_PLATFORM_ANDROID
+  // SDL reports backgrounding as window minimize/restore on Android, and
+  // only after resume: SDL blocks this thread while paused.
+  switch (event.type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_BACKGROUND:
+    case SDL_EVENT_WINDOW_MINIMIZED:
+    case SDL_EVENT_WINDOW_HIDDEN:
+      // The ANativeWindow is (or is about to be) released; drop the swapchain
+      // and VkSurfaceKHR built on it.
+      if (!surface_detached_) {
+        surface_detached_ = true;
+        OnSurfaceChanged(false);
+      }
+      break;
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_SHOWN:
+      if (surface_detached_ && GetNativeWindowHandle()) {
+        surface_detached_ = false;
+        OnSurfaceChanged(true);
+      }
+      break;
+    default:
+      break;
+  }
+#else
+  (void)event;
+#endif
+}
+
+'''
+        for anchor in ('void WindowSDL::HandleTouchEvent(SDL_Event& event) {',
+                       'void WindowSDL::HandleMouseEvent(SDL_Event& event) {'):
+            if anchor in window_content:
+                window_content = window_content.replace(anchor, lifecycle + anchor, 1)
+                break
+        else:
+            print('[ERROR] lifecycle insertion anchor not found in window_sdl.cpp')
+            return 1
+        print('[OK] Android app lifecycle handling added to window_sdl.cpp')
+    else:
+        print('[SKIP] window_sdl.cpp already handles app lifecycle events')
+
+    # 1f. windowed_app_context_sdl.cpp: dispatch lifecycle events and keep
+    #     Android out of the GNU/Linux surface includes.
+    app_context_cpp = os.path.join(sdk_dir, "src", "ui", "windowed_app_context_sdl.cpp")
+    if os.path.exists(app_context_cpp):
+        with open(app_context_cpp, 'r', encoding='utf-8') as f:
+            ac_content = f.read().replace('\r\n', '\n')
+        if 'HandleAppLifecycleEvent' not in ac_content:
+            anchor = ('    case SDL_EVENT_WILL_ENTER_BACKGROUND:\n'
+                      '    case SDL_EVENT_DID_ENTER_BACKGROUND:\n'
+                      '    case SDL_EVENT_DID_ENTER_FOREGROUND: {\n'
+                      '      for (const auto& [window_id, window] : windows_) {\n'
+                      '        (void)window_id;\n'
+                      '        if (window) {\n'
+                      '          window->HandleAppLifecycleEvent(event);\n'
+                      '        }\n'
+                      '      }\n'
+                      '      break;\n'
+                      '    }\n')
+            # The upstream context has no lifecycle dispatch; add it before
+            # the gamepad switch (or the drop/default tail if gamepads differ).
+            anchor2 = '    case SDL_EVENT_GAMEPAD_ADDED: {'
+            anchor3 = '''    case SDL_EVENT_DROP_FILE: {
+      if (WindowSDL* window = GetWindow(event.drop.windowID)) {
+        window->HandleDropEvent(event);
+      }
+      break;
+    }
+'''
+            if anchor2 in ac_content:
+                ac_content = ac_content.replace(anchor2, anchor + anchor2, 1)
+                print('[OK] Lifecycle event dispatch added to windowed_app_context_sdl.cpp')
+            elif anchor3 in ac_content:
+                ac_content = ac_content.replace(anchor3, anchor3 + anchor, 1)
+                print('[OK] Lifecycle event dispatch added to windowed_app_context_sdl.cpp (before default)')
+            else:
+                print('[ERROR] windowed_app_context_sdl.cpp dispatch anchor not found')
+                return 1
+            with open(app_context_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(ac_content)
+        else:
+            print('[SKIP] windowed_app_context_sdl.cpp already dispatches lifecycle events')
+    else:
+        print('[WARN] windowed_app_context_sdl.cpp not found; skipping lifecycle dispatch')
+
+    with open(window_sdl, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(window_content)
+
+    patch_file(
+        ui_cmake,
+        'elseif(PS5)\n    # No window system surface; presentation is VK_KHR_display.\n    set(REXUI_PLATFORM_SOURCES)',
+        'elseif(PS5)\n    # No window system surface; presentation is VK_KHR_display.\n    set(REXUI_PLATFORM_SOURCES)\nelseif(ANDROID)\n    set(REXUI_PLATFORM_SOURCES\n        surface_android.cpp\n    )',
+        'Set REXUI_PLATFORM_SOURCES for Android'
+    )
     patch_file(
         ui_cmake,
         'elseif(APPLE)\n    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")',
         'elseif(APPLE)\n    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")\nelseif(ANDROID)\n    target_link_libraries(rexui PRIVATE android)',
         'Link libandroid.so to rexui'
     )
-
-    # The pinned SDL file puts X11 in a final #else; make desktop selection
-    # explicit, then add the Android ANativeWindow surface path.
-    window_sdl = os.path.join(sdk_dir, "src", "ui", "window_sdl.cpp")
-    if not os.path.exists(window_sdl):
-        print(f"[ERROR] Required SDL window source is missing: {window_sdl}")
-        return 1
-    with open(window_sdl, 'r', encoding='utf-8') as f:
-        window_content = f.read().replace('\\r\\n', '\\n')
-
-    x11_include_fallback = '#else\n#include <X11/Xlib-xcb.h>'
-    guarded_x11_include = ('#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)\n'
-                           '#include <X11/Xlib-xcb.h>')
-    if x11_include_fallback in window_content:
-        window_content = window_content.replace(x11_include_fallback, guarded_x11_include, 1)
-        print('[OK] Added Android exclusion to fallback X11 SDL headers')
-    elif guarded_x11_include in window_content:
-        print('[SKIP] Fallback X11 SDL headers are already Android-guarded')
-    else:
-        print('[ERROR] Could not locate the v0.10.0 fallback X11 include')
-        return 1
-    # In CreateSurfaceImpl, the #else after macOS would select the XCB branch
-    # on Android too. Turn it into an explicit GNU/Linux-only branch.
-    surface_anchor = (
-        '#elif REX_PLATFORM_MAC\n'
-        '  if (allowed_types & Surface::kTypeFlag_CAMetalLayer)'
-    )
-    surface_start = window_content.find(surface_anchor)
-    xcb_start = window_content.find(
-        'if (allowed_types & Surface::kTypeFlag_XcbWindow)', surface_start
-    )
-    xcb_fallback = window_content.find('#else', surface_start, xcb_start)
-    guarded_xcb = '#elif REX_PLATFORM_GNU_LINUX && !defined(__ANDROID__)'
-    if surface_start >= 0 and xcb_start >= 0:
-        if xcb_fallback >= 0:
-            window_content = (window_content[:xcb_fallback] + guarded_xcb
-                              + window_content[xcb_fallback + len('#else'):])
-            print('[OK] Added Android exclusion to fallback XCB surface branch')
-        elif guarded_xcb in window_content[surface_start:xcb_start]:
-            print('[SKIP] Fallback XCB surface branch is already Android-guarded')
-        else:
-            print('[ERROR] Could not isolate the v0.10.0 XCB surface fallback')
-            return 1
-    else:
-        print('[ERROR] Could not locate the v0.10.0 CreateSurfaceImpl XCB branch')
-        return 1
-    if x11_include_fallback in window_content:
-        print('[ERROR] An unguarded X11 include remains in window_sdl.cpp')
-        return 1
-    if not re.search(
-        r'#elif REX_PLATFORM_GNU_LINUX && !defined\(__ANDROID__\)\s+'
-        r'SDL_PropertiesID props[\s\S]*?Surface::kTypeFlag_XcbWindow',
-        window_content,
-    ):
-        print('[ERROR] XCB surface code is not guarded from Android')
-        return 1
-    with open(window_sdl, 'w', encoding='utf-8') as f:
-        f.write(window_content)
 
     # 2. Chrono: Polyfill clock_cast on Android libc++
     chrono_h = os.path.join(sdk_dir, "include", "rex", "chrono", "chrono.h")
@@ -155,21 +503,21 @@ def main():
     core_cmake = os.path.join(sdk_dir, "src", "core", "CMakeLists.txt")
     patch_file(
         core_cmake,
-        'if(UNIX)\n    target_link_libraries(rexcore PRIVATE pthread rt dl)',
-        'if(ANDROID)\n    target_link_libraries(rexcore PRIVATE dl log)\nelse()\n    target_link_libraries(rexcore PRIVATE pthread rt dl)\nendif()',
+        'elseif(PS5)\n    # No librt or libdl: threads and timers come from the SDK\'s libc/libkernel.\nelseif(UNIX)',
+        'elseif(PS5)\n    # No librt or libdl: threads and timers come from the SDK\'s libc/libkernel.\nelseif(ANDROID)\n    target_link_libraries(rexcore PRIVATE dl log)\nelseif(UNIX)',
         'Link dl log to rexcore on Android (no librt.so)'
     )
 
     # 4. Numeric: Add Android to portable_float_from_chars preprocessor guard
     #    Android NDK libc++ lacks float std::from_chars. The SDK already has a
-    #    portable_float_from_chars fallback used for macOS; add Android
+    #    portable_float_from_chars fallback used for Mac/PS5; we just add Android
     #    to that same preprocessor condition (4 occurrences in numeric.h).
     numeric_h = os.path.join(sdk_dir, "include", "rex", "string", "numeric.h")
     if os.path.exists(numeric_h):
         with open(numeric_h, 'r', encoding='utf-8') as f:
             nc = f.read().replace('\r\n', '\n')
-        old_guard = '#if REX_PLATFORM_MAC'
-        new_guard = '#if REX_PLATFORM_MAC || defined(__ANDROID__)'
+        old_guard = '#if REX_PLATFORM_MAC || REX_PLATFORM_PS5'
+        new_guard = '#if REX_PLATFORM_MAC || REX_PLATFORM_PS5 || defined(__ANDROID__)'
         if new_guard in nc:
             print(f"[SKIP] Already patched numeric.h: portable_float_from_chars guard")
         elif old_guard in nc:
@@ -181,7 +529,7 @@ def main():
             print(f"[WARN] Guard not found in numeric.h")
 
     # 5. Fiber: Android lacks ucontext.h functions (getcontext/makecontext/swapcontext).
-    #    Provide the Android thread-only fiber implementation.
+    #    Provide thread-fiber support for Android (same approach as PS5).
     fiber_h = os.path.join(sdk_dir, "include", "rex", "thread", "fiber.h")
     patch_file(
         fiber_h,
@@ -197,8 +545,8 @@ def main():
     )
     patch_file(
         fiber_h,
-        '#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fiber_ = false;\n\n  static void Trampoline();\n#endif',
-        '#elif REX_PLATFORM_LINUX && !defined(__ANDROID__)\n  ucontext_t context_{};\n  std::vector<uint8_t> stack_;\n  void (*entry_)(void*) = nullptr;\n  void* arg_ = nullptr;\n  bool is_thread_fiber_ = false;\n\n  static void Trampoline();\n#elif REX_PLATFORM_ANDROID\n  bool is_thread_fiber_ = false;\n#endif',
+        '#elif REX_PLATFORM_PS5\n  // Thread fibers only; see fiber_ps5.cpp.\n  bool is_thread_fiber_ = false;\n#endif',
+        '#elif REX_PLATFORM_PS5 || defined(__ANDROID__)\n  // Thread fibers only; see fiber_ps5.cpp / fiber_posix.cpp.\n  bool is_thread_fiber_ = false;\n#endif',
         'Use thread-fiber member on Android'
     )
 
@@ -286,6 +634,8 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
         f.write(main_android_contents)
     print("[OK] Wrote Android API-level wrapper to include/rex/main_android.h")
 
+    # Include the helper at the first Android-only section in memory_posix.cpp,
+    # before AndroidInitialize() calls GetAndroidApiLevel().
     memory_posix = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
     if not os.path.exists(memory_posix):
         print("[ERROR] Required Android source file is missing: memory_posix.cpp")
@@ -293,16 +643,22 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
     with open(memory_posix, 'r', encoding='utf-8') as f:
         memory_content = f.read().replace('\r\n', '\n')
     android_block = '#if REX_PLATFORM_ANDROID\n'
-    helper_block = android_block + '#include <rex/main_android.h>'
-    if helper_block not in memory_content:
+    android_helper_include = android_block + '#include <rex/main_android.h>'
+    if android_helper_include not in memory_content:
         if android_block not in memory_content:
-            print("[ERROR] Could not find Android section in memory_posix.cpp")
+            print("[ERROR] Could not locate Android section in memory_posix.cpp")
             return 1
-        memory_content = memory_content.replace(android_block, helper_block + '\n', 1)
+        memory_content = memory_content.replace(android_block, android_helper_include + '\n', 1)
         with open(memory_posix, 'w', encoding='utf-8') as f:
             f.write(memory_content)
-        print("[OK] Added main_android.h before Android API-level calls")
-
+        print("[OK] Added main_android.h at start of memory_posix.cpp Android section")
+    else:
+        print("[SKIP] memory_posix.cpp Android section already includes main_android.h")
+    call_match = re.search(r'GetAndroidApiLevel\s*\(', memory_content)
+    include_pos = memory_content.find('#include <rex/main_android.h>')
+    if call_match is None or include_pos < 0 or include_pos > call_match.start():
+        print("[ERROR] Android API-level helper is not included before its call in memory_posix.cpp")
+        return 1
     # 7. Bionic (Android libc) has no robust mutexes: PTHREAD_MUTEX_ROBUST,
     #    pthread_mutexattr_setrobust() and pthread_mutex_consistent() do not
     #    exist there. The SDK guards those calls behind
@@ -322,9 +678,9 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
         'Define REX_PLATFORM_ANDROID in platform.h'
     )
 
-    # 8. Bionic does not consistently expose robust-mutex APIs. Exclude Android
-    #    from all Linux robust-mutex paths so no pthread_mutex_consistent symbol
-    #    is referenced; Android uses the existing portable std::mutex paths.
+    # 8. Bionic does not consistently expose robust-mutex functions across NDK
+    #    versions. Guard only the robust-mutex sections in the constructor,
+    #    Wait(), and WaitMultiple(); leave unrelated Linux feature checks alone.
     threading_posix = os.path.join(sdk_dir, "src", "core", "threading_posix.cpp")
     if not os.path.exists(threading_posix):
         print(f"[ERROR] File not found: {threading_posix}")
@@ -332,11 +688,13 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
     with open(threading_posix, 'r', encoding='utf-8') as f:
         threading_content = f.read().replace('\r\n', '\n')
 
-    replacements = (
+    robust_sections = (
         (
-            '#if REX_PLATFORM_LINUX\n    // Use robust mutexes so waits can recover if owner thread terminates.',
-            '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n    // Use robust mutexes so waits can recover if owner thread terminates.',
-            'robust-mutex initialization',
+            '#if REX_PLATFORM_LINUX\n'
+            '    // Use robust mutexes so waits can recover if owner thread terminates.',
+            '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n'
+            '    // Use robust mutexes so waits can recover if owner thread terminates.',
+            'Android guard for robust-mutex initialization',
         ),
         (
             '    auto predicate = [this] { return this->signaled(); };\n'
@@ -345,7 +703,7 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
             '    auto predicate = [this] { return this->signaled(); };\n'
             '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n'
             '    auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());',
-            'Wait robust-mutex recovery',
+            'Android guard for robust-mutex Wait recovery',
         ),
         (
             '      for (size_t i = 0; i < handles.size(); ++i) {\n'
@@ -354,17 +712,17 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
             '      for (size_t i = 0; i < handles.size(); ++i) {\n'
             '#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID\n'
             '        auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());',
-            'WaitMultiple robust-mutex recovery',
+            'Android guard for robust-mutex WaitMultiple recovery',
         ),
     )
-    for old_text, new_text, description in replacements:
+    for old_text, new_text, description in robust_sections:
         if new_text in threading_content:
-            print(f"[SKIP] Already Android-safe: {description}")
+            print(f"[SKIP] Already applied: {description}")
         elif old_text in threading_content:
             threading_content = threading_content.replace(old_text, new_text, 1)
-            print(f"[OK] Disabled Android robust-mutex path: {description}")
+            print(f"[OK] Applied: {description}")
         else:
-            print(f"[ERROR] Could not locate expected {description} block in threading_posix.cpp")
+            print(f"[ERROR] Could not apply: {description}")
             return 1
     with open(threading_posix, 'w', encoding='utf-8') as f:
         f.write(threading_content)
@@ -373,3 +731,4 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
     return 0
 if __name__ == "__main__":
     sys.exit(main())
+
