@@ -114,6 +114,11 @@ endmacro()
 # codegen, including one a project assembles itself rather than taking the
 # library rexglue_setup_target() builds. The stamp comes first: the DEPFILE
 # names it.
+# Cross builds (Android) cannot run the host codegen tool (it is compiled for
+# the target, and would exit 126 'Exec format error' on the build host). The
+# generated sources are committed to the repository, so skip codegen entirely
+# when they are present.
+if(NOT CMAKE_CROSSCOMPILING OR NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp")
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp"
            ${REXGLUE_ENTRYPOINT_GENERATED_SOURCES}
@@ -123,6 +128,7 @@ add_custom_command(
     COMMENT "Generating recompiled code for mcla"
     VERBATIM
 )
+endif()
 add_custom_target(mcla_codegen
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp")
 
