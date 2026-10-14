@@ -199,12 +199,17 @@ def main():
         if 'REX_ANDROID_LOG_DIR_FALLBACK' in log_content:
             print('[SKIP] logging.cpp: Android log dir fallback already present')
         elif old_line in log_content:
-            new_line = ('#ifdef __ANDROID__\n'
-                        '    // The SDL thread\'s working directory is read-only (/system/bin);\n'
-                        '    // an empty log_dir must not resolve there. (REX_ANDROID_LOG_DIR_FALLBACK)\n'
-                        '    auto log_dir = config.log_dir.empty() ? rex::filesystem::GetUserFolder() / "logs"'
-                        )
-            log_content = log_content.replace(old_line, new_line, 1)
+            old_line_full = (old_line + '\n'
+                             '                                          : std::filesystem::path(config.log_dir);')
+            new_line_full = ('#ifdef __ANDROID__\n'
+                             '    // The SDL thread\'s working directory is read-only (/system/bin);\n'
+                             '    // an empty log_dir must not resolve there. (REX_ANDROID_LOG_DIR_FALLBACK)\n'
+                             '    auto log_dir = config.log_dir.empty() ? rex::filesystem::GetUserFolder() / "logs"\n'
+                             '                                          : std::filesystem::path(config.log_dir);\n'
+                             '#else\n'
+                             + old_line_full + '\n'
+                             '#endif')
+            log_content = log_content.replace(old_line_full, new_line_full, 1)
             # Make sure GetUserFolder is declared.
             if '#include <rex/filesystem.h>' not in log_content:
                 log_content = log_content.replace('#include <rex/platform/env.h>',
