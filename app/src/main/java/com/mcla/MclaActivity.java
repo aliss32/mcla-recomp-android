@@ -402,6 +402,14 @@ public class MclaActivity extends SDLActivity {
         if (stamp.equals(readFirstLine(stampFile))) {
             return target;
         }
+        if (!assetExists(context, RESOURCES)) {
+            // The APK was built without the title resources (font atlases,
+            // button prompts, RPF key). Keep any existing copy on the device
+            // instead of wiping it, and let the caller decide whether the
+            // missing bundle is fatal.
+            Log.w(TAG, "no bundled Resources asset in APK; keeping existing " + target);
+            return target;
+        }
         deleteRecursively(target);
         copyAssetTree(context.getAssets(), RESOURCES, target);
         try (OutputStream out = new FileOutputStream(stampFile)) {
@@ -409,6 +417,15 @@ public class MclaActivity extends SDLActivity {
         }
         Log.i(TAG, "bundled resources copied to " + target);
         return target;
+    }
+
+    private static boolean assetExists(Context context, String path) {
+        try {
+            context.getAssets().open(path).close();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     private static void copyAssetTree(AssetManager assets, String path, File target)
