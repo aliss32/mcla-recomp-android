@@ -96,4 +96,7 @@ jobs:
         with:
           name: MCLA-Android-Vulkan-Turnip-Debug
           path: app/build/outputs/apk/debug/*.apk
+          # Store the APK as-is (no extra zip compression); it is already
+          # compressed and this keeps downloads/installation one step away.
+          compression-level: 0
           retention-days: 14
