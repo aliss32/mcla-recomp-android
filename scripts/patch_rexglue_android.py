@@ -948,6 +948,78 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         print('[ERROR] user_module.cpp not found')
         return 1
 
+    # 2b-2. xmemory.cpp: throttle the unhandled-violation log. On device the
+    #     guest can spin on one bad address (e.g. null+0x10 dereference in a
+    #     loop) and each fault logs a full ERROR line, which rotated out all
+    #     startup logs (20 x 5 MB of a single line). Log the first 32 per
+    #     (address,thread) pair, then one summary line per 4096 repeats.
+    xmemory_cpp = os.path.join(sdk_dir, "src", "system", "xmemory.cpp")
+    if os.path.exists(xmemory_cpp):
+        with open(xmemory_cpp, 'r', encoding='utf-8') as f:
+            xm = f.read().replace('\r\n', '\n')
+        if 'kUnhandledViolationLogLimit' in xm:
+            print('[SKIP] xmemory.cpp: violation log throttle already present')
+        else:
+            throttle_old = '''  uint32_t virtual_address = HostToGuestVirtual(host_address);
+  BaseHeap* heap = LookupHeap(virtual_address);
+  if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
+    REXSYS_ERROR(
+        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+        rex::thread::current_thread_id());
+    return false;
+  }'''
+            throttle_new = '''  uint32_t virtual_address = HostToGuestVirtual(host_address);
+  BaseHeap* heap = LookupHeap(virtual_address);
+  if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
+    // Throttle repeated identical faults: a guest spinning on one bad
+    // address would otherwise flood and rotate out every other log line.
+    // (REX_VIOLATION_LOG_THROTTLE)
+    static constexpr size_t kUnhandledViolationLogLimit = 32;
+    static constexpr size_t kUnhandledViolationLogStride = 4096;
+    struct ViolationKey {
+      uint32_t guest;
+      uintptr_t host;
+      uint32_t thread;
+      bool write;
+      bool operator==(const ViolationKey& o) const {
+        return guest == o.guest && host == o.host && thread == o.thread &&
+               write == o.write;
+      }
+    };
+    struct ViolationKeyHash {
+      size_t operator()(const ViolationKey& k) const {
+      return rex::memory::hash_combine(0, k.guest, k.host, k.thread, k.write ? 1 : 0);
+      }
+    };
+    static std::unordered_map<ViolationKey, size_t, ViolationKeyHash> violation_counts;
+    ViolationKey key{virtual_address, reinterpret_cast<uintptr_t>(host_address),
+                     rex::thread::current_thread_id(), is_write};
+    size_t count = ++violation_counts[key];
+    if (count > kUnhandledViolationLogLimit &&
+        ((count - kUnhandledViolationLogLimit) % kUnhandledViolationLogStride) != 1) {
+      return false;
+    }
+    REXSYS_ERROR(
+        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X} (count {})",
+        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+        rex::thread::current_thread_id(), count);
+    return false;
+  }'''
+            if throttle_old not in xm:
+                print('[ERROR] xmemory.cpp violation throttle anchor not found')
+                return 1
+            if '#include <unordered_map>' not in xm:
+                xm = xm.replace('#include <rex/system/xmemory.h>',
+                                '#include <rex/system/xmemory.h>\n#include <unordered_map>', 1)
+            xm = xm.replace(throttle_old, throttle_new, 1)
+            with open(xmemory_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(xm)
+            print('[OK] xmemory.cpp: unhandled violation log throttled')
+    else:
+        print('[ERROR] xmemory.cpp not found')
+        return 1
+
     # 2c. rex::style.h (a PUBLIC SDK header included by the recompiled code's
     #     PCH) includes imgui.h, but imgui is linked PRIVATE to rexruntime, so
     #     consumers of rex::runtime get no imgui include path. Make it PUBLIC.
