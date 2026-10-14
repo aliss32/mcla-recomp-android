@@ -902,19 +902,12 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         else:
             old = '''    auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
     if (!mmap) {
-      // Android: OpenMapped can fail (e.g. mmap of files under app-private
-      // or scoped storage). Fall through to the buffered path below instead
-      // of silently returning X_STATUS_UNSUCCESSFUL with no log at all -
-      // that masked the real failure point on device (LoadXexImage
-      // C0000001 with nothing in the log).
-      REXSYS_WARN("OpenMapped failed for {}; falling back to buffered read", path);
-    } else {
-      // Load the module.
-      result = LoadFromMemory(mmap->data(), mmap->size());
+      return result;
     }
-  }
-  if (mmap_unused_placeholder) {}
-  {'''
+
+    // Load the module.
+    result = LoadFromMemory(mmap->data(), mmap->size());
+  } else {'''
             new = '''    auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
     if (!mmap) {
       // Do not fail out silently: on Android the mmap of a game file can
