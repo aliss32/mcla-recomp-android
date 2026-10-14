@@ -823,6 +823,50 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         print('[ERROR] filesystem_posix.cpp not found')
         return 1
 
+    # 2b-2. Guest memory backing (xmemory.cpp Memory::Initialize needs a 4 GB
+    #     file-backed mapping). On Android, ASharedMemory_create is capped
+    #     (~1 GB on some devices / vendor gralloc limits) and /dev/ashmem is
+    #     gone on API 30+, so the 4 GB mapping fails with
+    #     "Unable to reserve the 4gb guest address space" and the runtime
+    #     aborts before the title starts. memfd_create (API 26+, always
+    #     available to un no size cap) backs the mapping instead;
+    #     it stays in #if REX_PLATFORM_ANDROID so other platforms are
+    #     untouched.
+    memory_posix_memfd = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
+    if os.path.exists(memory_posix_memfd):
+        with open(memory_posix_memfd, 'r', encoding='utf-8') as f:
+            mp = f.read().replace('\r\n', '\n')
+        if 'memfd_create' in mp:
+            print('[SKIP] memory_posix.cpp already uses memfd_create')
+        else:
+            old_block = '''#if REX_PLATFORM_ANDROID
+  // TODO(Triang3l): Check if memfd can be used instead on API 30+.
+  if (android_ASharedMemory_create_) {'''
+            new_block = '''#if REX_PLATFORM_ANDROID
+  // memfd_create first: ASharedMemory/ashmem fds are capped below the 4 GB
+  // guest mapping size on many devices, which made Memory::Initialize fail.
+  // memfd_create (API 26+) has no such cap and needs no libandroid symbol.
+  {
+    int memfd = memfd_create(path.filename().c_str(), MFD_CLOEXEC);
+    if (memfd >= 0 && ftruncate(memfd, static_cast<off_t>(length)) == 0) {
+      return static_cast<FileMappingHandle>(memfd);
+    }
+    if (memfd >= 0) {
+      close(memfd);
+    }
+  }
+  if (android_ASharedMemory_create_) {'''
+            if old_block not in mp:
+                print('[ERROR] CreateFileMappingHandle Android anchor not found in memory_posix.cpp')
+                return 1
+            mp = mp.replace(old_block, new_block, 1)
+            with open(memory_posix_memfd, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(mp)
+            print('[OK] memory_posix.cpp: CreateFileMappingHandle now tries memfd_create on Android')
+    else:
+        print('[ERROR] memory_posix.cpp not found')
+        return 1
+
     # 2c. rex::style.h (a PUBLIC SDK header included by the recompiled code's
     #     PCH) includes imgui.h, but imgui is linked PRIVATE to rexruntime, so
     #     consumers of rex::runtime get no imgui include path. Make it PUBLIC.
