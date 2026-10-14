@@ -888,6 +888,55 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         print('[ERROR] memory_posix.cpp not found')
         return 1
 
+    # 2b-3. UserModule::LoadFromFile silently returns X_STATUS_UNSUCCESSFUL
+    #     when OpenMapped fails, before any logging exists, so the device log
+    #     only shows "LoadXexImage C0000001" with no reason. On Android the
+    #   mmap of game files can fail while normal reads work fine; fall back
+    #   to the buffered-read path instead of failing out.
+    user_module_cpp = os.path.join(sdk_dir, "src", "system", "user_module.cpp")
+    if os.path.exists(user_module_cpp):
+        with open(user_module_cpp, 'r', encoding='utf-8') as f:
+            um = f.read().replace('\r\n', '\n')
+        if 'falling back to buffered read' in um:
+            print('[SKIP] user_module.cpp already has the OpenMapped fallback')
+        else:
+            old = '''    auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
+    if (!mmap) {
+      // Android: OpenMapped can fail (e.g. mmap of files under app-private
+      // or scoped storage). Fall through to the buffered path below instead
+      // of silently returning X_STATUS_UNSUCCESSFUL with no log at all -
+      // that masked the real failure point on device (LoadXexImage
+      // C0000001 with nothing in the log).
+      REXSYS_WARN("OpenMapped failed for {}; falling back to buffered read", path);
+    } else {
+      // Load the module.
+      result = LoadFromMemory(mmap->data(), mmap->size());
+    }
+  }
+  if (mmap_unused_placeholder) {}
+  {'''
+            new = '''    auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
+    if (!mmap) {
+      // Do not fail out silently: on Android the mmap of a game file can
+      // fail while buffered reads work fine. Fall through to the buffered
+      // path below; LoadFromMemory logs its own errors either way.
+      REXSYS_WARN("OpenMapped failed for {}; falling back to buffered read", path_);
+    } else {
+      // Load the module.
+      result = LoadFromMemory(mmap->data(), mmap->size());
+    }
+  } else {'''
+            if old not in um:
+                print('[ERROR] user_module.cpp OpenMapped anchor not found')
+                return 1
+            um = um.replace(old, new, 1)
+            with open(user_module_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(um)
+            print('[OK] user_module.cpp: OpenMapped failure falls back to buffered read')
+    else:
+        print('[ERROR] user_module.cpp not found')
+        return 1
+
     # 2c. rex::style.h (a PUBLIC SDK header included by the recompiled code's
     #     PCH) includes imgui.h, but imgui is linked PRIVATE to rexruntime, so
     #     consumers of rex::runtime get no imgui include path. Make it PUBLIC.
