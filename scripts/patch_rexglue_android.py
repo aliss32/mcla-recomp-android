@@ -536,6 +536,20 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         print('[ERROR] filesystem_posix.cpp not found')
         return 1
 
+    # 2c. rex::style.h (a PUBLIC SDK header included by the recompiled code's
+    #     PCH) includes imgui.h, but imgui is linked PRIVATE to rexruntime, so
+    #     consumers of rex::runtime get no imgui include path. Make it PUBLIC.
+    kernel_cmake = os.path.join(sdk_dir, "src", "kernel", "CMakeLists.txt")
+    patch_file(
+        kernel_cmake,
+        'target_link_libraries(rexruntime PRIVATE o1heap rexcore rexfilesystem rexui rexaudio rexinput imgui)',
+        'target_link_libraries(rexruntime PRIVATE o1heap rexcore rexfilesystem rexui rexaudio rexinput)\n'
+        '# rex::style.h is a public header and includes imgui.h; the include path\n'
+        '# must reach consumers of rex::runtime.\n'
+        'target_link_libraries(rexruntime PUBLIC imgui)',
+        'Propagate the imgui include path to rex::runtime consumers'
+    )
+
     # 2. Chrono: Polyfill clock_cast on Android libc++
     chrono_h = os.path.join(sdk_dir, "include", "rex", "chrono", "chrono.h")
     patch_file(
