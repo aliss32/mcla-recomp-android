@@ -252,6 +252,87 @@ def main():
     else:
         print('[WARN] logging.cpp not found; skipping log dir fallback patch')
 
+    # 1b-4. filesystem_posix.cpp: /proc/self/exe is app_process on Android, so
+    #     GetExecutablePath must report the library holding this code instead.
+    #     Otherwise the GPU plugin loader resolves the plugin next to
+    #     app_process64 (i.e. /system/bin) and never finds it in
+    #     nativeLibraryDir.
+    fs_posix = os.path.join(sdk_dir, "src", "core", "filesystem_posix.cpp")
+    if os.path.exists(fs_posix):
+        with open(fs_posix, 'r', encoding='utf-8') as f:
+            fs_content = f.read().replace('\r\n', '\n')
+        if 'dladdr(reinterpret_cast<const void*>(&GetExecutablePath)' in fs_content:
+            print('[SKIP] filesystem_posix.cpp: Android dladdr executable path already present')
+        else:
+            proc_old = ('#else\n'
+                        '  char buff[FILENAME_MAX] = "";\n'
+                        '  readlink("/proc/self/exe", buff, FILENAME_MAX);\n'
+                        '  std::string s(buff);\n'
+                        '  return s;\n'
+                        '#endif')
+            proc_new = ('#elif defined(__ANDROID__)\n'
+                        '  // /proc/self/exe is app_process. The runtime and its GPU plugins are shared\n'
+                        '  // libraries unpacked side by side into nativeLibraryDir, so report the\n'
+                        '  // library holding this code instead. (REX_ANDROID_DLADDR_EXE)\n'
+                        '  Dl_info info{};\n'
+                        '  if (dladdr(reinterpret_cast<const void*>(&GetExecutablePath), &info) && info.dli_fname) {\n'
+                        '    return info.dli_fname;\n'
+                        '  }\n'
+                        '#else\n'
+                        '  char buff[FILENAME_MAX] = "";\n'
+                        '  readlink("/proc/self/exe", buff, FILENAME_MAX);\n'
+                        '  std::string s(buff);\n'
+                        '  return s;\n'
+                        '#endif')
+            if proc_old not in fs_content:
+                print('[ERROR] filesystem_posix.cpp: /proc/self/exe anchor not found')
+                return 1
+            fs_content = fs_content.replace(proc_old, proc_new, 1)
+            if '#include <dlfcn.h>' not in fs_content:
+                fs_content = fs_content.replace('#include <libgen.h>',
+                                                '#include <dlfcn.h>\n#include <libgen.h>', 1)
+            with open(fs_posix, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(fs_content)
+            print('[OK] Patched filesystem_posix.cpp: Android dladdr executable path')
+    else:
+        print('[WARN] filesystem_posix.cpp not found; skipping dladdr executable path patch')
+
+    # 1b-5. gpu_plugin_loader.cpp: Android builds use no per-config postfix
+    #     (SDLActivity loads by fixed name) and the plugin lives next to the
+    #     runtime library in nativeLibraryDir (via the dladdr-based
+    #     GetExecutableFolder), not next to app_process64.
+    loader_cpp = os.path.join(sdk_dir, "src", "system", "gpu_plugin_loader.cpp")
+    if os.path.exists(loader_cpp):
+        with open(loader_cpp, 'r', encoding='utf-8') as f:
+            ld_content = f.read().replace('\r\n', '\n')
+        if 'REX_ANDROID_NO_CONFIG_POSTFIX' in ld_content:
+            print('[SKIP] gpu_plugin_loader.cpp: Android no-postfix already present')
+        else:
+            postfix_old = ('  std::string_view postfix = "";\n'
+                           '  if (kConfig == "Debug") {\n'
+                           '    postfix = "d";\n'
+                           '  } else if (kConfig == "RelWithDebInfo") {\n'
+                           '    postfix = "rd";\n'
+                           '  }')
+            postfix_new = ('  std::string_view postfix = "";\n'
+                           '  if (REX_PLATFORM_ANDROID) {\n'
+                           '    // Android builds use no per-config postfix (see the SDK CMakeLists).\n'
+                           '    // (REX_ANDROID_NO_CONFIG_POSTFIX)\n'
+                           '  } else if (kConfig == "Debug") {\n'
+                           '    postfix = "d";\n'
+                           '  } else if (kConfig == "RelWithDebInfo") {\n'
+                           '    postfix = "rd";\n'
+                           '  }')
+            if postfix_old not in ld_content:
+                print('[ERROR] gpu_plugin_loader.cpp: config postfix anchor not found')
+                return 1
+            ld_content = ld_content.replace(postfix_old, postfix_new, 1)
+            with open(loader_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(ld_content)
+            print('[OK] Patched gpu_plugin_loader.cpp: no per-config postfix on Android')
+    else:
+        print('[WARN] gpu_plugin_loader.cpp not found; skipping no-postfix patch')
+
     # 1c. UI CMakeLists: Disable X11 / Wayland on Android
     ui_cmake = os.path.join(sdk_dir, "src", "ui", "CMakeLists.txt")
     patch_file(
