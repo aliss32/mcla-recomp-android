@@ -897,7 +897,9 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
     if os.path.exists(user_module_cpp):
         with open(user_module_cpp, 'r', encoding='utf-8') as f:
             um = f.read().replace('\r\n', '\n')
-        if 'falling back to buffered read' in um:
+        if 'Buffered read of the XEX' in um:
+            print('[SKIP] user_module.cpp already buffers the XEX read')
+        elif 'falling back to buffered read' in um:
             print('[SKIP] user_module.cpp already has the OpenMapped fallback')
         else:
             old = '''    auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
@@ -911,9 +913,25 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
             new = '''    auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
     if (!mmap) {
       // Do not fail out silently: on Android the mmap of a game file can
-      // fail while buffered reads work fine. Fall through to the buffered
-      // path below; LoadFromMemory logs its own errors either way.
+      // fail while buffered reads work fine. Read the XEX into a buffer and
+      // load from that instead. (Measured on device: mmap of a game file
+      // under app storage fails here while buffered reads succeed.)
       REXSYS_WARN("OpenMapped failed for {}; falling back to buffered read", path_);
+      std::vector<uint8_t> buffer(fs_entry->size());
+      rex::filesystem::File* file = nullptr;
+      result = fs_entry->Open(rex::filesystem::FileAccess::kGenericRead, &file);
+      if (XFAILED(result)) {
+        REXSYS_ERROR("Open for buffered XEX read failed: {:08X}", (uint32_t)result);
+        return result;
+      }
+      size_t bytes_read = 0;
+      result = file->ReadSync(std::span<uint8_t>(buffer), 0, &bytes_read);
+      file->Destroy();
+      if (XFAILED(result)) {
+        REXSYS_ERROR("Buffered XEX read failed: {:08X}", (uint32_t)result);
+        return result;
+      }
+      result = LoadFromMemory(buffer.data(), bytes_read);
     } else {
       // Load the module.
       result = LoadFromMemory(mmap->data(), mmap->size());
