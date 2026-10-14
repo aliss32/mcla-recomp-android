@@ -138,6 +138,40 @@ def main():
     else:
         print('[WARN] windowed_app_main_sdl.cpp not found; skipping SDL_main rename')
 
+    # 1b-2. rex_app.cpp: the runtime log directory must be writable on Android.
+    #     The pinned SDK already has the right idea (REX_PLATFORM_MAC ||
+    #     defined(__ANDROID__) -> user_dir/logs), but the upstream condition in
+    #     some revisions only covers REX_PLATFORM_MAC; without the Android arm
+    #     the log dir resolves next to the executable (nativeLibraryDir -
+    #     read-only), create_directories throws filesystem_error and the game
+    #     aborts with "Read-only file system [/system/bin/logs]" right after
+    #     SDL_main starts.
+    rex_app_cpp = os.path.join(sdk_dir, "src", "ui", "rex_app.cpp")
+    if os.path.exists(rex_app_cpp):
+        with open(rex_app_cpp, 'r', encoding='utf-8') as f:
+            rax_content = f.read().replace('\r\n', '\n')
+        log_old = '#if REX_PLATFORM_MAC || defined(__ANDROID__)'
+        if '#elif REX_PLATFORM_ANDROID' in rax_content or 'user_dir / "logs"' in rax_content and 'REX_PLATFORM_ANDROID' in rax_content:
+            print('[SKIP] rex_app.cpp: Android log dir already handled')
+        elif log_old in rax_content:
+            print('[OK] rex_app.cpp: Android log dir condition already present')
+        else:
+            # Generic form: REX_PLATFORM_MAC only. Add the Android arm.
+            log_generic_old = '#if REX_PLATFORM_MAC\n'
+            log_generic_new = ('#if REX_PLATFORM_MAC || defined(__ANDROID__)\n')
+            if '#else\n    log_config.log_dir = (exe_dir / "logs").string();' in rax_content:
+                rax_content = rax_content.replace(
+                    '#if REX_PLATFORM_MAC\n    // Android\'s library directory is read-only.',
+                    '#if REX_PLATFORM_MAC || defined(__ANDROID__)\n    // Android\'s library directory is read-only.', 1)
+                with open(rex_app_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write(rax_content)
+                print('[OK] Patched rex_app.cpp: runtime logs go to the user dir on Android')
+            else:
+                print('[WARN] rex_app.cpp: log dir anchor not found; the runtime log '
+                      'will try the executable folder (crash on Android)')
+    else:
+        print('[WARN] rex_app.cpp not found; skipping log dir patch')
+
     # 1c. UI CMakeLists: Disable X11 / Wayland on Android
     ui_cmake = os.path.join(sdk_dir, "src", "ui", "CMakeLists.txt")
     patch_file(
