@@ -10,22 +10,9 @@ git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.pat
 
 The first was several files at first; they are combined now because several touch the same build files and would not apply independently. The second goes on top of the first (both change `src/graphics/vulkan/command_processor.cpp`). The build scripts apply all three, and add the second to an SDK checkout that was patched before it existed.
 
-## rexglue-v0.10.0-android-ui.patch
+## Android UI changes
 
-Android's windowing and presentation changes are kept separate from the PS5 patch above, so a PS5 build is unaffected. Apply it on top of `rexglue-v0.10.0-mcla.patch` in the Android SDK checkout:
-
-```
-git apply ../../patches/rexglue-v0.10.0-android-ui.patch
-```
-
-| Change | Files | Affects |
-|---|---|---|
-| `AndroidNativeWindowSurface` (holding an `ANativeWindow` reference) and its `kTypeIndex_AndroidNativeWindow`/`kTypeFlag_AndroidNativeWindow` type | `include/rex/ui/surface_android.h`, `src/ui/surface_android.cpp` | Android only |
-| SDL `CreateSurfaceImpl` and `GetNativeWindowHandle` select the Android native window instead of falling through to X11 | `src/ui/window_sdl.cpp` | Android only |
-| UI CMake builds `surface_android.cpp`, links `libandroid`, and keeps Android out of the X11/Wayland dependency branch | `src/ui/CMakeLists.txt` | Android only |
-| Vulkan presenter and instance keep the existing `VK_KHR_android_surface` path while excluding the XCB/Wayland surface code (`REX_PLATFORM_LINUX` is also set on Android) | `src/ui/vulkan/vulkan_presenter.cpp`, `src/ui/vulkan/vulkan_instance.cpp`, `include/rex/ui/vulkan/instance.h`, `include/rex/ui/vulkan/api.h` | Android only |
-
-Requires the NDK's Android platform headers; `scripts/patch_rexglue_android.py` applies the same change set to an SDK checkout from the build scripts.
+Android's windowing and presentation changes are applied by `scripts/patch_rexglue_android.py` (idempotent text edits run by the CI workflow after the two patches above), not by a `git apply` patch — a patch file drifted out of context when the PS5 UI changes in `rexglue-v0.10.0-mcla.patch` changed the same hunks. The script: adds `AndroidNativeWindowSurface` (`include/rex/ui/surface_android.h`, `src/ui/surface_android.cpp`, compiled via `elseif(ANDROID)` in `src/ui/CMakeLists.txt`), makes `WindowSDL` return the `ANativeWindow` and create the Android surface, keeps Android out of the X11/Wayland branches, handles app background/foreground surface detach, and applies the Bionic compatibility fixes (fibers, robust mutexes, `clock_cast`, `from_chars`, API-level wrapper). Do not reintroduce a separate android-ui `.patch` file.
 
 ## rexglue-v0.10.0-mcla.patch
 
