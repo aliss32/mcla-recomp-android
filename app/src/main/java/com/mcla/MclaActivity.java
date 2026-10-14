@@ -263,15 +263,15 @@ public class MclaActivity extends SDLActivity {
         for (String argument : arguments) {
             if (argument.startsWith("--diagnostics")) diagnosticsSet = true;
         }
-        // "Play (Debug Log)" from the launcher: the runtime logs at info level
-        // and the whole process log is recorded into files/debug_logs/.
+        // "Play (Debug Log)" from the launcher: the runtime logs at debug
+        // level and the whole process log is recorded into files/debug_logs/.
         applyPerformanceTestArguments(arguments);
         mDebugLog = getIntent() != null && getIntent().getBooleanExtra(EXTRA_DEBUG_LOG, false);
+        // Play (Debug Log): debug level lets the XEX loader's failure logs
+        // through. Otherwise, the args.txt log_level is honoured as-is.
         if (mDebugLog) {
-            arguments.removeIf(a -> a.startsWith("--diagnostics") || a.startsWith("--log_level"));
-            diagnosticsSet = false;
-            arguments.add("--log_level=info");
-            mDebugLogFile = DebugLog.start(dataRoot);
+            arguments.removeIf(a -> a.startsWith("--log_level"));
+            arguments.add("--log_level=debug");
         }
         if (!diagnosticsSet) {
             arguments.add("--diagnostics=true");
