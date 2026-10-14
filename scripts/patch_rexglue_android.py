@@ -847,9 +847,9 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
                     print('[ERROR] memory_posix.cpp first-include anchor not found')
                     return 1
                 mp = mp.replace(gnu_anchor,
-                    '#if REX_PLATFORM_ANDROID\n'
+                    '#ifdef __ANDROID__\n'
                     '#define _GNU_SOURCE  // memfd_create/MFD_CLOEXEC in <sys/mman.h>\n'
-                    '#endif\n' + gnu_anchor, 1)
+                    '#endif  // __ANDROID__\n' + gnu_anchor, 1)
                 print('[OK] memory_posix.cpp: _GNU_SOURCE defined before includes on Android')
             old_block = '''#if REX_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
