@@ -839,6 +839,18 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         if 'memfd_create' in mp:
             print('[SKIP] memory_posix.cpp already uses memfd_create')
         else:
+            # memfd_create/MFD_CLOEXEC are only declared by the NDK's
+            # <sys/mman.h> when _GNU_SOURCE is defined before any include.
+            gnu_anchor = '#include <atomic>'
+            if '#define _GNU_SOURCE' not in mp:
+                if gnu_anchor not in mp:
+                    print('[ERROR] memory_posix.cpp first-include anchor not found')
+                    return 1
+                mp = mp.replace(gnu_anchor,
+                    '#if REX_PLATFORM_ANDROID\n'
+                    '#define _GNU_SOURCE  // memfd_create/MFD_CLOEXEC in <sys/mman.h>\n'
+                    '#endif\n' + gnu_anchor, 1)
+                print('[OK] memory_posix.cpp: _GNU_SOURCE defined before includes on Android')
             old_block = '''#if REX_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {'''
