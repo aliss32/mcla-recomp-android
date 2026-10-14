@@ -189,17 +189,21 @@ final class Installer {
         if (uri == null) return null;
         if ("file".equals(uri.getScheme())) return uri.getPath();
         try {
+            // Tree URIs (ACTION_OPEN_DOCUMENT_TREE results) are not document
+            // URIs; decode the tree document id, e.g. "primary:Download/game"
+            // -> /storage/emulated/0/Download/game.
+            if (!DocumentsContract.isDocumentUri(context, uri)
+                    && DocumentsContract.isTreeUri(uri)) {
+                String id = DocumentsContract.getTreeDocumentId(uri);
+                String resolved = externalStoragePathFromId(id);
+                if (resolved != null) return resolved;
+            }
             if (DocumentsContract.isDocumentUri(context, uri)) {
                 String authority = uri.getAuthority();
                 String id = DocumentsContract.getDocumentId(uri);
                 if ("com.android.externalstorage.documents".equals(authority)) {
-                    int colon = id.indexOf(':');
-                    String volume = colon < 0 ? id : id.substring(0, colon);
-                    String relative = colon < 0 ? "" : id.substring(colon + 1);
-                    File base = "primary".equalsIgnoreCase(volume)
-                            ? Environment.getExternalStorageDirectory()
-                            : new File("/storage/" + volume);
-                    return new File(base, relative).getAbsolutePath();
+                    String resolved = externalStoragePathFromId(id);
+                    if (resolved != null) return resolved;
                 }
                 if ("com.android.providers.downloads.documents".equals(authority)) {
                     if (id.startsWith("raw:")) return id.substring(4);
@@ -229,6 +233,18 @@ final class Installer {
             Log.w(TAG, "no path for " + uri, e);
             return null;
         }
+    }
+
+    /** Resolves "primary:Download/game" or "0000-0000:foo" to a filesystem path. */
+    private static String externalStoragePathFromId(String id) {
+        if (id == null) return null;
+        int colon = id.indexOf(':');
+        String volume = colon < 0 ? id : id.substring(0, colon);
+        String relative = colon < 0 ? "" : id.substring(colon + 1);
+        File base = "primary".equalsIgnoreCase(volume)
+                ? Environment.getExternalStorageDirectory()
+                : new File("/storage/" + volume);
+        return new File(base, relative).getAbsolutePath();
     }
 
     @SuppressWarnings("deprecation")

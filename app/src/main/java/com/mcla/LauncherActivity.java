@@ -918,8 +918,17 @@ public class LauncherActivity extends Activity {
     }
 
     String savedGameDir() {
-        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        String saved = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .getString(PREF_GAME_DIR, null);
+        if (saved == null) return null;
+        // The picker may have been pointed at the parent of the game folder
+        // (e.g. Download/mcla-recomp-v1.0.1); drop down to the "game"
+        // subfolder that holds default.xex when only that layout applies.
+        File dir = new File(saved);
+        if (new File(dir, "default.xex").isFile()) return saved;
+        File game = new File(dir, "game");
+        if (new File(game, "default.xex").isFile()) return game.getAbsolutePath();
+        return saved;
     }
 
     @Override
@@ -937,6 +946,13 @@ public class LauncherActivity extends Activity {
                 if (path == null) {
                     // Fall back to the URI string itself so the engine can still try
                     path = treeUri.toString();
+                    toast("Could not resolve to a filesystem path; using: " + path);
+                } else if (new File(path, "default.xex").isFile()) {
+                    toast("Game directory set to: " + path);
+                } else if (new File(path).isDirectory()) {
+                    toast("Selected folder has no default.xex: " + path);
+                } else {
+                    toast("Selected folder is not readable: " + path);
                 }
                 getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                         .putString(PREF_GAME_DIR, path).apply();
@@ -1073,7 +1089,7 @@ public class LauncherActivity extends Activity {
             byte[] buffer = new byte[4096];
             int read;
             while ((read = in.read(buffer)) > 0) bytes.write(buffer, 0, read);
-            return new JSONObject(bytes.toString("UTF-8").replace("﻿", ""));
+            return new JSONObject(bytes.toString("UTF-8").replace("", ""));
         } catch (Exception e) {
             return null;
         }
@@ -1421,7 +1437,7 @@ public class LauncherActivity extends Activity {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                 new FileInputStream(file), StandardCharsets.UTF_8))) {
             String line = reader.readLine();
-            return line == null ? null : line.replace("﻿", "").trim();
+            return line == null ? null : line.replace("", "").trim();
         } catch (IOException e) {
             return null;
         }
