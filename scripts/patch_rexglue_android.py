@@ -828,10 +828,10 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
     #     (~1 GB on some devices / vendor gralloc limits) and /dev/ashmem is
     #     gone on API 30+, so the 4 GB mapping fails with
     #     "Unable to reserve the 4gb guest address space" and the runtime
-    #     aborts before the title starts. memfd_create (API 26+, always
-    #     available to un no size cap) backs the mapping instead;
-    #     it stays in #if REX_PLATFORM_ANDROID so other platforms are
-    #     untouched.
+    #     aborts before the title starts. The raw memfd_create syscall is
+    #     used instead (bionic only declares it for API 30+, and the build
+    #     targets android29); it has no size cap and stays inside
+    #     #if REX_PLATFORM_ANDROID so other platforms are untouched.
     memory_posix_memfd = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
     if os.path.exists(memory_posix_memfd):
         with open(memory_posix_memfd, 'r', encoding='utf-8') as f:
@@ -839,18 +839,20 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
         if 'memfd_create' in mp:
             print('[SKIP] memory_posix.cpp already uses memfd_create')
         else:
-            # memfd_create/MFD_CLOEXEC are only declared by the NDK's
-            # <sys/mman.h> when _GNU_SOURCE is defined before any include.
+            # memfd_create is only declared by bionic <sys/mman.h> for API
+            # level 30+; our build targets android29, so _GNU_SOURCE alone
+            # doesn't expose it (NDK clang even predefines _GNU_SOURCE).
+            # Call the kernel syscall directly instead - SYS_memfd_create
+            # exists since kernel 3.17 and doesn't depend on API level.
             gnu_anchor = '#include <atomic>'
-            if '#define _GNU_SOURCE' not in mp:
-                if gnu_anchor not in mp:
-                    print('[ERROR] memory_posix.cpp first-include anchor not found')
-                    return 1
-                mp = mp.replace(gnu_anchor,
-                    '#ifdef __ANDROID__\n'
-                    '#define _GNU_SOURCE  // memfd_create/MFD_CLOEXEC in <sys/mman.h>\n'
-                    '#endif  // __ANDROID__\n' + gnu_anchor, 1)
-                print('[OK] memory_posix.cpp: _GNU_SOURCE defined before includes on Android')
+            if gnu_anchor not in mp:
+                print('[ERROR] memory_posix.cpp first-include anchor not found')
+                return 1
+            mp = mp.replace(gnu_anchor,
+                '#if REX_PLATFORM_ANDROID\n'
+                '#include <sys/syscall.h>  // SYS_memfd_create\n'
+                '#endif  // REX_PLATFORM_ANDROID\n' + gnu_anchor, 1)
+            print('[OK] memory_posix.cpp: <sys/syscall.h> included for SYS_memfd_create on Android')
             old_block = '''#if REX_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {'''
@@ -859,7 +861,11 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
   // guest mapping size on many devices, which made Memory::Initialize fail.
   // memfd_create (API 26+) has no such cap and needs no libandroid symbol.
   {
-    int memfd = memfd_create(path.filename().c_str(), MFD_CLOEXEC);
+    // Direct kernel syscall: bionic only declares memfd_create for API 30+;
+    // the syscall itself has existed since kernel 3.17 and has no size cap,
+    // unlike ASharedMemory/ashmem fds which fail the 4 GB guest mapping.
+    int memfd = static_cast<int>(
+        syscall(SYS_memfd_create, path.filename().c_str(), MFD_CLOEXEC));
     if (memfd >= 0 && ftruncate(memfd, static_cast<off_t>(length)) == 0) {
       return static_cast<FileMappingHandle>(memfd);
     }
