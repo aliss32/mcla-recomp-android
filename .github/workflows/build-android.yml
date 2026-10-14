@@ -35,9 +35,18 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      - name: Setup ReXGlue SDK
+        run: |
+          git clone https://github.com/rexglue/rexglue-sdk.git /tmp/rexglue-sdk
+          git -C /tmp/rexglue-sdk checkout f5337cdc947ff6d4c4196737e2c807a48f2a1fc2
+          git -C /tmp/rexglue-sdk submodule update --init --recursive
+          git -C /tmp/rexglue-sdk apply "$GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-v0.10.0-mcla.patch"
+          git -C /tmp/rexglue-sdk apply "$GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-minmax-blend-factor.patch"
+          python3 "$GITHUB_WORKSPACE/scripts/patch_rexglue_android.py" /tmp/rexglue-sdk
+          echo "REXSDK_DIR=/tmp/rexglue-sdk" >> "$GITHUB_ENV"
       - name: Clone and Build SDL3
         run: |
-          git clone --depth=1 --branch release-3.2.14 https://github.com/libsdl-org/SDL.git /tmp/SDL3
+          git clone --depth=1 --branch release-3.4.0 https://github.com/libsdl-org/SDL.git /tmp/SDL3
           cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
@@ -60,16 +69,13 @@ jobs:
         run: |
           rm -rf app/src/main/sdl_java
           mkdir -p app/src/main/sdl_java
-          cp -r /tmp/SDL3/android-project/app/src/main/java/* app/src/main/sdl_java/
-      - name: Setup ReXGlue SDK
-        run: |
-          git clone https://github.com/rexglue/rexglue-sdk.git /tmp/rexglue-sdk
-          git -C /tmp/rexglue-sdk checkout f5337cdc947ff6d4c4196737e2c807a48f2a1fc2
-          git -C /tmp/rexglue-sdk submodule update --init --recursive
-          git -C /tmp/rexglue-sdk apply "$GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-v0.10.0-mcla.patch"
-          git -C /tmp/rexglue-sdk apply "$GITHUB_WORKSPACE/mcla-recomp/patches/rexglue-minmax-blend-factor.patch"
-          python3 "$GITHUB_WORKSPACE/scripts/patch_rexglue_android.py" /tmp/rexglue-sdk
-          echo "REXSDK_DIR=/tmp/rexglue-sdk" >> "$GITHUB_ENV"
+          # libmain.so embeds the SDK's pinned SDL3 (thirdparty/sdl3 submodule,
+          # release-3.4.x line) statically, and that SDL registers the JNI
+          # methods of org.libsdl.app.SDLActivity from JNI_OnLoad. The Java
+          # sources must come from the SAME SDL revision; the 3.2.14 wrappers
+          # are missing the 3.4.x native method signatures and the app dies in
+          # java.lang.NoSuchMethodError: SDLActivity.nativeSetupJNI()V.
+          cp -r /tmp/rexglue-sdk/thirdparty/sdl3/android-project/app/src/main/java/* app/src/main/sdl_java/
       - name: Grant permissions
         run: chmod +x gradlew scripts/*.sh
       - name: Build driver proxy
