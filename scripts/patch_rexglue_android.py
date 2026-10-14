@@ -840,18 +840,21 @@ int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
             print('[SKIP] memory_posix.cpp already uses memfd_create')
         else:
             # memfd_create is only declared by bionic <sys/mman.h> for API
-            # level 30+; our build targets android29, so _GNU_SOURCE alone
-            # doesn't expose it (NDK clang even predefines _GNU_SOURCE).
-            # Call the kernel syscall directly instead - SYS_memfd_create
+            # level 30+; our build targets android29, so the libc wrapper is
+            # unavailable regardless of _GNU_SOURCE (NDK clang predefines it
+            # anyway). Call the kernel syscall directly - SYS_memfd_create
             # exists since kernel 3.17 and doesn't depend on API level.
+            # NOTE: the guard must be __ANDROID__ (a compiler builtin), NOT
+            # REX_PLATFORM_ANDROID: that macro is only defined later by
+            # rex/platform.h, so any top-of-file block using it is dead code.
             gnu_anchor = '#include <atomic>'
             if gnu_anchor not in mp:
                 print('[ERROR] memory_posix.cpp first-include anchor not found')
                 return 1
             mp = mp.replace(gnu_anchor,
-                '#if REX_PLATFORM_ANDROID\n'
+                '#ifdef __ANDROID__\n'
                 '#include <sys/syscall.h>  // SYS_memfd_create\n'
-                '#endif  // REX_PLATFORM_ANDROID\n' + gnu_anchor, 1)
+                '#endif  // __ANDROID__\n' + gnu_anchor, 1)
             print('[OK] memory_posix.cpp: <sys/syscall.h> included for SYS_memfd_create on Android')
             old_block = '''#if REX_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
@@ -1043,30 +1046,51 @@ inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
         f.write(main_android_contents)
     print("[OK] Wrote Android API-level wrapper to include/rex/main_android.h")
 
-    # Include the helper at the first Android-only section in memory_posix.cpp,
-    # before AndroidInitialize() calls GetAndroidApiLevel().
+    # Include the helper immediately after rex/platform.h in memory_posix.cpp,
+    # before AndroidInitialize() calls GetAndroidApiLevel(). The anchor must be
+    # the platform.h include: the first '#if REX_PLATFORM_ANDROID' block in the
+    # file sits BEFORE that include, where the macro is not yet defined, so an
+    # include guarded by it would never be seen (that bug bit the syscall
+    # include patch and produced 'no member named GetAndroidApiLevel').
     memory_posix = os.path.join(sdk_dir, "src", "core", "memory_posix.cpp")
     if not os.path.exists(memory_posix):
         print("[ERROR] Required Android source file is missing: memory_posix.cpp")
         return 1
     with open(memory_posix, 'r', encoding='utf-8') as f:
         memory_content = f.read().replace('\r\n', '\n')
-    android_block = '#if REX_PLATFORM_ANDROID\n'
-    android_helper_include = android_block + '#include <rex/main_android.h>'
-    if android_helper_include not in memory_content:
-        if android_block not in memory_content:
-            print("[ERROR] Could not locate Android section in memory_posix.cpp")
-            return 1
-        memory_content = memory_content.replace(android_block, android_helper_include + '\n', 1)
-        with open(memory_posix, 'w', encoding='utf-8') as f:
-            f.write(memory_content)
-        print("[OK] Added main_android.h at start of memory_posix.cpp Android section")
-    else:
-        print("[SKIP] memory_posix.cpp Android section already includes main_android.h")
+    if '#include <rex/main_android.h>' in memory_content:
+        # Remove any stale include (e.g. one inserted by an earlier revision
+        # inside '#if REX_PLATFORM_ANDROID' before platform.h defines the
+        # macro - that guard never compiled and GetAndroidApiLevel was left
+        # undeclared). Re-inserted below at the correct position.
+        memory_content = memory_content.replace('#include <rex/main_android.h>', '', 1)
+        # Collapse an empty #ifdef __ANDROID__ / #endif pair left behind when
+        # the stale include was the only line inside its guard.
+        memory_content = memory_content.replace(
+            '#ifdef __ANDROID__\n#endif  // __ANDROID__\n', '', 1)
+    platform_anchor = '#include <rex/platform.h>'
+    if platform_anchor not in memory_content:
+        print("[ERROR] Could not locate rex/platform.h include in memory_posix.cpp")
+        return 1
+    memory_content = memory_content.replace(
+        platform_anchor,
+        '#ifdef __ANDROID__\n'
+        '#include <rex/main_android.h>\n'
+        '#endif  // __ANDROID__\n' + platform_anchor, 1)
+    with open(memory_posix, 'w', encoding='utf-8') as f:
+        f.write(memory_content)
+    print("[OK] Added main_android.h before rex/platform.h in memory_posix.cpp")
     call_match = re.search(r'GetAndroidApiLevel\s*\(', memory_content)
     include_pos = memory_content.find('#include <rex/main_android.h>')
-    if call_match is None or include_pos < 0 or include_pos > call_match.start():
+    platform_pos = memory_content.find('#include <rex/platform.h>')
+    if call_match is None or include_pos < 0:
         print("[ERROR] Android API-level helper is not included before its call in memory_posix.cpp")
+        return 1
+    if platform_pos < 0 or include_pos > platform_pos:
+        print("[ERROR] main_android.h include must come after rex/platform.h in memory_posix.cpp")
+        return 1
+    if include_pos > call_match.start():
+        print("[ERROR] main_android.h include must come before GetAndroidApiLevel call in memory_posix.cpp")
         return 1
     # 7. Bionic (Android libc) has no robust mutexes: PTHREAD_MUTEX_ROBUST,
     #    pthread_mutexattr_setrobust() and pthread_mutex_consistent() do not
