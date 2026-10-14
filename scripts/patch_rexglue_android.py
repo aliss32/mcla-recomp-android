@@ -159,30 +159,60 @@ def main():
         #     log_config.log_dir = (exe_dir / "logs").string();
         #   #endif
         block_re = re.compile(
-            r'(?m)^(\s*)#if ([^\n]*\n)'                       # group 1: indent, group 2: condition
-            r'(\s*//[^\n]*\n)*'                                # comment lines
-            r'\s*log_config\.log_dir = \(user_dir / "logs"\)\.string\(\);\n'
-            r'\s*#else\n'
-            r'(?:\s*//[^\n]*\n)*'
-            r'\s*log_config\.log_dir = \(exe_dir / "logs"\)\.string\(\);\n')
+            r'(?m)^([ \t]*)#if ([^\n]*\n)'                     # group 1: indent, group 2: condition
+            r'(?:[ \t]*//[^\n]*\n)*'                           # comment lines
+            r'[ \t]*log_config\.log_dir = \(user_dir / "logs"\)\.string\(\);\n'
+            r'[ \t]*#else\n'
+            r'(?:[ \t]*//[^\n]*\n)*'
+            r'[ \t]*log_config\.log_dir = \(exe_dir / "logs"\)\.string\(\);\n')
         match = block_re.search(rax_content)
-        if not match:
-            print('[WARN] rex_app.cpp: log dir block not found; the runtime log '
-                  'may try the executable folder (crash on Android)')
-        elif 'defined(__ANDROID__)' in match.group(2) or 'REX_PLATFORM_ANDROID' in match.group(2):
-            print('[SKIP] rex_app.cpp: Android log dir condition already present')
-        else:
-            new_cond = match.group(2).rstrip()
-            if 'REX_PLATFORM_MAC' in new_cond:
-                new_cond += ' || defined(__ANDROID__)'
+        if match:
+            if 'defined(__ANDROID__)' in match.group(2) or 'REX_PLATFORM_ANDROID' in match.group(2):
+                print('[SKIP] rex_app.cpp: Android log dir condition already present')
             else:
-                new_cond += ' || REX_PLATFORM_ANDROID'
-            replacement = (match.group(1) + '#if ' + new_cond + '\n'
-                           + match.group(0)[match.end(2) - match.start(0) + len(match.group(2)) + 1:])
-            rax_content = rax_content[:match.start()] + replacement + rax_content[match.end():]
-            with open(rex_app_cpp, 'w', encoding='utf-8', newline='\n') as f:
-                f.write(rax_content)
-            print('[OK] Patched rex_app.cpp: runtime logs go to the user dir on Android')
+                new_cond = match.group(2).rstrip()
+                if 'REX_PLATFORM_MAC' in new_cond:
+                    new_cond += ' || defined(__ANDROID__)'
+                else:
+                    new_cond += ' || REX_PLATFORM_ANDROID'
+                replacement = (match.group(1) + '#if ' + new_cond + '\n'
+                               + match.group(0)[match.end(2) - match.start(0) + len(match.group(2)) + 1:])
+                rax_content = rax_content[:match.start()] + replacement + rax_content[match.end():]
+                with open(rex_app_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                    f.write(rax_content)
+                print('[OK] Patched rex_app.cpp: runtime logs go to the user dir on Android')
+        else:
+            # Older revisions have no #if at all — just the unconditional
+            # exe_dir/logs assignment. Wrap it in a platform guard instead.
+            # On Android exe_dir is /system/bin (read-only), so the log must
+            # go to the user data dir (GetUserFolder()/GetName()/logs).
+            uncond_re = re.compile(
+                r'(?m)^([ \t]*)log_config\.log_dir = \(exe_dir / "logs"\)\.string\(\);\n')
+            umatch = uncond_re.search(rax_content)
+            if not umatch:
+                print('[WARN] rex_app.cpp: log dir block not found; the runtime log '
+                      'may try the executable folder (crash on Android)')
+            else:
+                indent = umatch.group(1)
+                guarded = (
+                    '#ifdef __ANDROID__\n'
+                    + indent + '// exe_dir is /system/bin (read-only) on Android; the log must'
+                    '\n' + indent + '// go to the mutable user data dir instead.\n'
+                    + indent + 'log_config.log_dir = (rex::filesystem::GetUserFolder() / GetName() / "logs").string();\n'
+                    + '#else\n'
+                    + umatch.group(0)
+                    + '#endif\n')
+                rax_content = rax_content[:umatch.start()] + guarded + rax_content[umatch.end():]
+                # Make sure GetUserFolder is declared.
+                if '#include <rex/filesystem.h>' not in rax_content:
+                    rax_content = rax_content.replace('#include <rex/ui/rex_app.h>',
+                                                      '#include <rex/ui/rex_app.h>\n#include <rex/filesystem.h>', 1)
+                    with open(rex_app_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                        f.write(rax_content)
+                else:
+                    with open(rex_app_cpp, 'w', encoding='utf-8', newline='\n') as f:
+                        f.write(rax_content)
+                print('[OK] Patched rex_app.cpp (unconditional form): runtime logs go to the user dir on Android')
     else:
         print('[WARN] rex_app.cpp not found; skipping log dir patch')
 
