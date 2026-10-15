@@ -34,12 +34,6 @@ uint32_t UnpackColorFormat(uint32_t value) {
   return uint32_t(info.color_format);
 }
 
-uint32_t UnpackColorBase(uint32_t value) {
-  reg::RB_COLOR_INFO info;
-  info.value = value;
-  return info.color_base | (info.color_base_bit_11 << 11);
-}
-
 } // namespace
 
 MclaNativeCommandProcessor::MclaNativeCommandProcessor(
@@ -166,14 +160,29 @@ bool MclaNativeCommandProcessor::IssueCopy() {
   }
   if (copy_control.copy_command != xenos::CopyCommand::kNull) {
     uint32_t format;
+    uint32_t source_base;
     if (copying_depth) {
       format = uint32_t(register_file_->Get<reg::RB_DEPTH_INFO>().depth_format);
+      const auto &depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
+      source_base =
+          depth_info.depth_base | (depth_info.depth_base_bit_11 << 11);
     } else {
-      format = UnpackColorFormat(register_file_->Get<reg::RB_COLOR_INFO>(
+      const auto color_info = register_file_->Get<reg::RB_COLOR_INFO>(
           reg::RB_COLOR_INFO::rt_register_indices[copy_control
-                                                      .copy_src_select]));
+                                                      .copy_src_select]);
+      format = UnpackColorFormat(color_info.value);
+      source_base =
+          color_info.color_base | (color_info.color_base_bit_11 << 11);
     }
-    census_.RecordResolve("copy", copying_depth, format);
+    // The destination region in guest memory: what the swap will read back.
+    // RB_COPY_DEST_BASE has a register index but no union struct, so it is
+    // read as the raw value; pitch is in pixels per RB_COPY_DEST_PITCH.
+    const uint32_t dest_base = (*register_file_)[XE_GPU_REG_RB_COPY_DEST_BASE];
+    const auto dest_pitch =
+        register_file_->Get<reg::RB_COPY_DEST_PITCH>().copy_dest_pitch;
+    census_.RecordResolve("copy", copying_depth, format,
+                          copy_control.copy_src_select, source_base, dest_base,
+                          dest_pitch);
   } else if (!copy_control.color_clear_enable &&
              !copy_control.depth_clear_enable) {
     census_.RecordSkipped("copy_noop");
