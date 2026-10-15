@@ -52,6 +52,19 @@ set(REXGPU_MCLA_NATIVE_SOURCES
     src/native/graphics_system.cpp
     src/native/command_processor.cpp
     src/native/frame_census.cpp
+    # SDK graphics sources the census subclass links against. The base
+    # classes live only in the rexgpu-xenos target's source list, and this
+    # plugin must not link that plugin (duplicate plugin_main), so the
+    # needed translation units are compiled into this target instead.
+    # Same list the undefined symbols demanded; add more only when the
+    # linker names them.
+    ${REXSDK_DIR}/src/graphics/command_processor.cpp
+    ${REXSDK_DIR}/src/graphics/graphics_system.cpp
+    ${REXSDK_DIR}/src/graphics/registers.cpp
+    ${REXSDK_DIR}/src/graphics/register_file.cpp
+    ${REXSDK_DIR}/src/graphics/packet_disassembler.cpp
+    ${REXSDK_DIR}/src/graphics/util/draw.cpp
+    ${REXSDK_DIR}/src/graphics/util/draw_extent_estimator.cpp
 )
 add_library(rexgpu-mcla-native SHARED ${REXGPU_MCLA_NATIVE_SOURCES})
 add_library(rex::gpu-mcla-native ALIAS rexgpu-mcla-native)
@@ -69,6 +82,10 @@ target_include_directories(rexgpu-mcla-native PRIVATE
 # xxhash.h comes from the vendored xxHash submodule through the xxHash::xxhash
 # target (the same dependency the Xenos plugin links).
 target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime xxHash::xxhash)
+# Show every missing symbol in one link, not one per retry (lld only).
+if(ANDROID)
+    target_link_options(rexgpu-mcla-native PRIVATE "-Wl,--error-limit=0")
+endif()
 if(TARGET Vulkan::Headers)
     target_link_libraries(rexgpu-mcla-native PRIVATE Vulkan::Headers)
 endif()
