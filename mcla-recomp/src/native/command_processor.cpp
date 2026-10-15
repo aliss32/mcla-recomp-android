@@ -7,7 +7,6 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
-#include <rex/memory.h>
 
 #include "graphics_system.h"
 
@@ -130,8 +129,8 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
   const auto &depth = register_file_->Get<reg::RB_DEPTH_INFO>();
   reg::RB_COLOR_INFO color[xenos::kMaxColorRenderTargets];
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    color[i].value = register_file_->Get<reg::RB_COLOR_INFO>(
-        reg::RB_COLOR_INFO::rt_register_indices[i]);
+    color[i].value =
+        (*register_file_)[reg::RB_COLOR_INFO::rt_register_indices[i]];
   }
   const uint32_t color_write_mask =
       register_file_->Get<reg::RB_COLOR_MASK>().value & 0xFFFFu;
@@ -164,8 +163,9 @@ bool MclaNativeCommandProcessor::IssueCopy() {
     // target 0 when the copy source is depth.
     const uint32_t rt = copying_depth ? 0 : copy_control.copy_src_select;
     census_.RecordClear(
-        false, UnpackColorFormat(register_file_->Get<reg::RB_COLOR_INFO>(
-                   reg::RB_COLOR_INFO::rt_register_indices[rt])));
+        false,
+        UnpackColorFormat(
+            (*register_file_)[reg::RB_COLOR_INFO::rt_register_indices[rt]]));
   }
   if (copy_control.copy_command != xenos::CopyCommand::kNull) {
     // Raw register reads (Get<> vs union ambiguity avoided) for the full
