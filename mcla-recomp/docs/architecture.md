@@ -21,7 +21,7 @@
 
 1. `scripts/extract_game.py <iso>` walks XDVDFS and copies the game files to `game/`. No decryption.
 2. `rexglue codegen mcla_manifest.toml` loads `game/default.xex` (decrypting in memory with the SDK's own key), analyses it, and writes C++ to `generated/default/`.
-3. CMake builds `mcla_recomp` (the generated code) and `mcla` (host app), linked against `rexruntime` from the SDK. The Xenos GPU implementation is a plugin, `rexgpu-xenos`, loaded at start with `--gpu_plugin=xenos`.
+3. CMake builds `mcla_recomp` (the generated code) and `mcla` (host app), linked against `rexruntime` from the SDK. The GPU implementation is a plugin: the Android launcher defaults to the native census plugin with `--gpu_plugin=mcla-native --mcla_gpu_backend=any`; desktop scripts load the Xenos plugin with `--gpu_plugin=xenos`.
 
 ## Runtime (from ReXGlue, Xenia-derived)
 

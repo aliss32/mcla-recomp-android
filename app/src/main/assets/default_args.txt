@@ -1,9 +1,14 @@
 --log_level=info
---mcla_gpu_backend=vulkan
+--gpu_plugin=mcla-native
+--mcla_gpu_backend=any
+--render_target_path_vulkan=fsi
+--gpu_allow_invalid_fetch_constants=true
+--readback_resolve=full
+--readback_memexport=true
 --mcla_fps=30
---mcla_skip_intro=true
 --mcla_audio=sdl
---mcla_single_tile=true
+--mcla_single_tile=false
+--mcla_intro=normal
 --mcla_shadows=true
 --mcla_race_shadows=true
 --mcla_fast_car_shadows=true
