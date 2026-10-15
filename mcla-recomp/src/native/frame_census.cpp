@@ -260,7 +260,7 @@ void FrameCensusWriter::EndFrame() {
   std::string line =
       fmt::format("{{\"frame\":{},\"guest_time_us\":{},\"swap\":"
                   "[{},{}],\"swap_ptr\":\"0x{:08X}\",\"draws\":{},"
-                  "\"copies\":{},\"clears\":{},",
+                  "\"copies\":{},\"clears\":{}",
                   r.frame, r.guest_time_us, r.swap_width, r.swap_height,
                   r.swap_ptr, r.draws, r.copies, r.clears);
   std::fwrite(line.data(), 1, line.size(), file_);
