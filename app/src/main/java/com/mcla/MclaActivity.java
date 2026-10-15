@@ -492,6 +492,11 @@ public class MclaActivity extends SDLActivity {
      * Only the exact old line is rewritten; edited values are left alone.
      */
     private static final String[][] ARGUMENT_MIGRATIONS = {
+        // Older builds copied "--mcla_gpu_backend=vulkan", which forces the
+        // Xenos plugin even when the user switched to the native renderer.
+        // Only the exact old line is rewritten; --gpu_plugin is added only
+        // when the file has no gpu_plugin line at all (see migrateArguments).
+        {"--mcla_gpu_backend=vulkan", "--mcla_gpu_backend=any"},
     };
 
     private static void migrateArguments(File file) {
@@ -513,6 +518,25 @@ public class MclaActivity extends SDLActivity {
             }
         } catch (IOException e) {
             Log.w(TAG, "cannot update " + file, e);
+        }
+        // Add --gpu_plugin=mcla-native only when no gpu_plugin line exists at
+        // all: an explicit user choice (xenos or mcla-native) is never
+        // overwritten.
+        if (!file.isFile()) return;
+        try {
+            List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
+            boolean hasPlugin = false;
+            for (String line : lines) {
+                String clean = cleanLine(line);
+                if (clean.startsWith("--gpu_plugin=")) hasPlugin = true;
+            }
+            if (!hasPlugin) {
+                lines.add("--gpu_plugin=mcla-native");
+                Files.write(file.toPath(), lines, StandardCharsets.UTF_8);
+                Log.i(TAG, "added --gpu_plugin=mcla-native to " + file);
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "cannot add gpu_plugin to " + file, e);
         }
     }
 

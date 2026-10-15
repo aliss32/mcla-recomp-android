@@ -119,6 +119,13 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
                                            IndexBufferInfo *index_buffer_info,
                                            bool major_mode_explicit) {
   (void)major_mode_explicit;
+  // kCopy draws are resolves/clears drawn as primitives; the base
+  // CommandProcessor does not route them to IssueCopy, so the backend does
+  // (the Xenos plugin does the same).
+  if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode ==
+      xenos::EdramMode::kCopy) {
+    return IssueCopy();
+  }
   // One census call per draw, sampling the live register state at draw
   // time (the color/depth info registers are written after
   // RB_SURFACE_INFO, so a write-time record would go stale). The write
@@ -201,7 +208,9 @@ bool MclaNativeCommandProcessor::IssueCopy() {
     census_.RecordResolve(info);
   } else if (!copy_control.color_clear_enable &&
              !copy_control.depth_clear_enable) {
-    census_.RecordSkipped("copy_noop");
+    census_.RecordSkipped(fmt::format("copy_noop;cmd {};src {}",
+                                      uint32_t(copy_control.copy_command),
+                                      uint32_t(copy_control.copy_src_select)));
   }
   return true;
 }
