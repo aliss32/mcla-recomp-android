@@ -42,4 +42,34 @@ else()
     add_executable(mcla ${MCLA_SOURCES})
 endif()
 
+# Native renderer stage 1 (census) GPU plugin, built next to rexgpu-xenos.
+# Selected with --gpu_plugin=mcla-native. See docs/native-renderer/.
+if(REXSDK_DIR)
+    set(REXGLUE_ROOT "${REXSDK_DIR}")
+endif()
+set(REXGPU_MCLA_NATIVE_SOURCES
+    src/native/plugin_main.cpp
+    src/native/graphics_system.cpp
+    src/native/command_processor.cpp
+    src/native/frame_census.cpp
+)
+add_library(rexgpu-mcla-native SHARED ${REXGPU_MCLA_NATIVE_SOURCES})
+add_library(rex::gpu-mcla-native ALIAS rexgpu-mcla-native)
+set_target_properties(rexgpu-mcla-native PROPERTIES
+    OUTPUT_NAME "rexgpu-mcla-native"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+target_include_directories(rexgpu-mcla-native PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${REXSDK_DIR}
+)
+target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime)
+if(TARGET Vulkan::Headers)
+    target_link_libraries(rexgpu-mcla-native PRIVATE Vulkan::Headers)
+endif()
+if(COMMAND rexglue_apply_target_settings)
+    rexglue_apply_target_settings(rexgpu-mcla-native)
+endif()
+
 rexglue_setup_target(mcla GPU_PLUGINS xenos)

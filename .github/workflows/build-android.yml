@@ -90,6 +90,7 @@ jobs:
           test -f app/src/main/jniLibs/arm64-v8a/libSDL3.so || { echo "libSDL3.so missing!"; exit 1; }
           test -f app/src/main/jniLibs/arm64-v8a/librexruntime.so || { echo "librexruntime.so missing!"; exit 1; }
           test -f app/src/main/jniLibs/arm64-v8a/librexgpu-xenos.so || { echo "librexgpu-xenos.so missing!"; exit 1; }
+          test -f app/src/main/jniLibs/arm64-v8a/librexgpu-mcla-native.so || { echo "librexgpu-mcla-native.so missing!"; exit 1; }
       - name: Assemble APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4

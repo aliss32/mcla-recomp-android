@@ -33,7 +33,7 @@ cmake -S "$REPO/mcla-recomp" -B "$BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
 
 echo "== Building MCLA target with $JOBS jobs"
-cmake --build "$BUILD_DIR" --target mcla rexgpu-xenos -- -j"$JOBS"
+cmake --build "$BUILD_DIR" --target mcla rexgpu-xenos rexgpu-mcla-native -- -j"$JOBS"
 
 echo "== Staging native libraries"
 cp "$NDK_SYSROOT_LIB/libc++_shared.so" "$JNILIBS/"

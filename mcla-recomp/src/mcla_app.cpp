@@ -14,6 +14,15 @@
 REXCVAR_DEFINE_STRING(mcla_gpu_backend, "any", "MCLA",
                       "Graphics backend for the Xenos GPU plugin: any, vulkan or d3d12");
 
+// Native renderer stage 1: the frame contract census is written to this file
+// (JSON Lines, one record per frame). Only meaningful with
+// --gpu_plugin=mcla-native. Default: the user log directory's census file.
+// Defined here because the cvar registry is process-wide; the mcla-native
+// GPU plugin only reads it.
+REXCVAR_DEFINE_STRING(mcla_native_census, "", "MCLA",
+                      "Native renderer stage 1: write the frame contract census to this "
+                      "file (JSON Lines). Empty disables the census");
+
 // The runtime's rotating log must never land beside the executable: on Android
 // that is /system/bin (read-only), and create_directories there aborts the
 // game right after SDL_main starts. Set the log file explicitly so the SDK's
@@ -104,6 +113,22 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   config.audio_factory = &CreateMclaAudioSystem;
   if (config.gpu_plugin.empty()) {
     config.gpu_plugin = "xenos";
+  }
+
+  // The census runs in the native plugin; it reads the path itself through
+  // the cvar, but default it under the log directory so a run without flags
+  // still records somewhere writable.
+  if (config.gpu_plugin == "mcla-native") {
+    std::string census = REXCVAR_GET(mcla_native_census);
+    if (census.empty()) {
+      std::filesystem::path base =
+          REXCVAR_GET(log_file).empty()
+              ? rex::filesystem::GetUserFolder() / "MclaRecomp" / "logs"
+              : std::filesystem::path(REXCVAR_GET(log_file)).parent_path();
+      census = (base / "mcla_frame_census.jsonl").string();
+    }
+    REXCVAR_SET(mcla_native_census, census);
+    REXLOG_INFO("mcla_native: census enabled, output {}", census);
   }
 
   // Left to the SDK when "any"; it then loads the plugin named by --gpu_plugin
