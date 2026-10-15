@@ -32,7 +32,8 @@ keys.*
 *.dll
 *.so
 /third_party/
-/tools/
+/tools/*
+!/tools/check_swap.py
 /out/
 *.log
 
