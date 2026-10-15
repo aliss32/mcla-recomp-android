@@ -55,6 +55,9 @@ struct FrameRecord {
   uint64_t frame = 0;
   uint64_t guest_time_us = 0;
   uint32_t swap_width = 0, swap_height = 0;
+  // Guest address the swap reads the frontbuffer from. Compared against the
+  // last resolve's "dest 0x..." to find the wrong-EDRAM-region reads.
+  uint32_t swap_ptr = 0;
   uint32_t draws = 0, copies = 0, clears = 0;
   // Reason a draw was skipped or a resolve was dropped, for anything the
   // census could not classify - surfaced in EndFrame, never silent.
@@ -134,14 +137,14 @@ public:
   void RecordDraw(const reg::RB_SURFACE_INFO &surface,
                   const reg::RB_COLOR_INFO (&color)[4],
                   const reg::RB_DEPTH_INFO &depth, uint32_t edram_mode,
-                  uint32_t color_write_mask, xenos::PrimitiveType prim,
-                  uint64_t vs_hash, uint64_t ps_hash, uint32_t index_count,
-                  bool indexed);
+                  uint32_t color_write_mask, bool depth_stencil_enabled,
+                  xenos::PrimitiveType prim, uint64_t vs_hash, uint64_t ps_hash,
+                  uint32_t index_count, bool indexed);
   void RecordResolve(const char *kind, bool depth, uint32_t format,
                      uint32_t src_select, uint32_t source_base,
                      uint32_t dest_base, uint32_t dest_pitch);
   void RecordClear(bool depth, uint32_t format);
-  void RecordSwap(uint32_t width, uint32_t height);
+  void RecordSwap(uint32_t width, uint32_t height, uint32_t frontbuffer_ptr);
   void RecordSkipped(const std::string &reason);
   void SetEnabled(bool enabled, const std::filesystem::path &path);
 
