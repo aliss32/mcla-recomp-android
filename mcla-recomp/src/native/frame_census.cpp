@@ -139,11 +139,20 @@ void FrameCensusWriter::RecordDraw(
   key.depth_format = uint32_t(depth.depth_format);
   key.depth_base = depth.depth_base | (depth.depth_base_bit_11 << 11);
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    key.color_formats[i] = uint32_t(color[i].color_format);
+    // Normalize: an unwritten target (mask nibble 0) is 0xFF, so it is
+    // never confused with a real format (0 = 8_8_8_8) in the key.
+    key.color_formats[i] = ((color_write_mask >> (4 * i)) & 0xF)
+                               ? uint32_t(color[i].color_format)
+                               : 0xFFu;
   }
   ++current_.surface_configs[key];
-  ++current_.primitive_types[fmt::format("{}", uint32_t(prim))];
-  ++current_.shader_pairs[fmt::format("{:016X}/{:016X}", vs_hash, ps_hash)];
+  const uint32_t prim_value = uint32_t(prim);
+  if (prim_value < FrameRecord::kMaxPrimitiveTypes) {
+    ++current_.primitive_counts[prim_value];
+  } else {
+    RecordSkippedLocked(fmt::format("primitive_out_of_range_{}", prim_value));
+  }
+  ++current_.shader_pairs[{vs_hash, ps_hash}];
   if (current_.samples.size() < FrameRecord::kMaxSamplesPerFrame) {
     FrameRecord::DrawSample sample{};
     sample.prim_type = uint32_t(prim);
@@ -157,23 +166,33 @@ void FrameCensusWriter::RecordDraw(
     sample.depth_format = key.depth_format;
     sample.depth_base = key.depth_base;
     for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-      sample.color_formats[i] = uint32_t(color[i].color_format);
+      // Same normalization as the key: an unwritten target is 0xFF, not a
+      // format of 0 that would read as 8_8_8_8.
+      sample.color_formats[i] = key.color_formats[i];
       sample.color_bases[i] =
-          color[i].color_base | (color[i].color_base_bit_11 << 11);
-      sample.blend_control[i] = 0; // filled by the caller if needed later
+          ((color_write_mask >> (4 * i)) & 0xF)
+              ? color[i].color_base | (color[i].color_base_bit_11 << 11)
+              : 0;
     }
     current_.samples.push_back(sample);
   }
 }
 
 void FrameCensusWriter::RecordResolve(const char *kind, bool depth,
-                                      uint32_t format) {
+                                      uint32_t format, uint32_t src_select,
+                                      uint32_t src_base, uint32_t dest_base,
+                                      uint32_t dest_pitch) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!enabled())
     return;
   ++current_.copies;
   const char *name = depth ? DepthFormatName(format) : ColorFormatName(format);
-  std::string key = fmt::format("{}_{}", kind, name);
+  // The resolve key carries the EDRAM region the copy reads (the source
+  // base at the copied target) and the guest destination (base + pitch),
+  // which is what the broken-render analysis compares against the swap.
+  std::string key =
+      fmt::format("{}_{};src_sel {}@0x{:05X};dest 0x{:05X},pitch {}", kind,
+                  name, src_select, src_base, dest_base, dest_pitch);
   ++current_.resolve_kinds[key];
   if (std::string_view(name) == "unknown") {
     RecordSkippedLocked(fmt::format("resolve_format_{}", format));
@@ -236,7 +255,10 @@ void FrameCensusWriter::EndFrame() {
     std::fputc('}', file_);
   };
   // Surface configs: convert the struct keys to their string form here, at
-  // one place and once per distinct configuration per frame.
+  // one place and once per distinct configuration per frame. Color formats
+  // are in the string; an unwritten target (normalized to 0xFF) prints as
+  // "-" so configurations that differ only in formats stay distinct.
+  auto rt = [](uint32_t f) { return f == 0xFFu ? "-" : ColorFormatName(f); };
   std::fputs(",\"surfaces\":{", file_);
   {
     bool first = true;
@@ -244,14 +266,41 @@ void FrameCensusWriter::EndFrame() {
       if (!first)
         std::fputc(',', file_);
       first = false;
-      fmt::print(file_, "\"{},{};mask 0x{:02X};mode {};{}@{}\":{}", key.pitch,
-                 MsaaName(key.msaa), key.color_write_mask, key.edram_mode,
-                 DepthFormatName(key.depth_format), key.depth_base, count);
+      fmt::print(file_,
+                 "\"{},{};{},{},{},{};{};mask 0x{:04X};mode {};{}@{}\":{}",
+                 key.pitch, MsaaName(key.msaa), rt(key.color_formats[0]),
+                 rt(key.color_formats[1]), rt(key.color_formats[2]),
+                 rt(key.color_formats[3]), DepthFormatName(key.depth_format),
+                 key.color_write_mask, key.edram_mode, key.depth_base, count);
     }
     std::fputc('}', file_);
   }
-  write_map("shader_pairs", r.shader_pairs);
-  write_map("primitives", r.primitive_types);
+  // Shader pairs: string form from the struct key.
+  std::fputs(",\"shader_pairs\":{", file_);
+  {
+    bool first = true;
+    for (const auto &[key, count] : r.shader_pairs) {
+      if (!first)
+        std::fputc(',', file_);
+      first = false;
+      fmt::print(file_, "\"{:016X}/{:016X}\":{}", key.vs, key.ps, count);
+    }
+    std::fputc('}', file_);
+  }
+  // Primitives: enum value counters.
+  std::fputs(",\"primitives\":{", file_);
+  {
+    bool first = true;
+    for (uint32_t i = 0; i < FrameRecord::kMaxPrimitiveTypes; ++i) {
+      if (!r.primitive_counts[i])
+        continue;
+      if (!first)
+        std::fputc(',', file_);
+      first = false;
+      fmt::print(file_, "\"{}\":{}", i, r.primitive_counts[i]);
+    }
+    std::fputc('}', file_);
+  }
   write_map("resolves", r.resolve_kinds);
   write_map("skipped", r.skipped_reasons);
   std::fputs(",\"samples\":[", file_);
@@ -269,11 +318,10 @@ void FrameCensusWriter::EndFrame() {
         "\"color\":\"{}@0x{:05X},{},0x{:05X},{},0x{:05X},{},0x{:05X}\"}}",
         s.prim_type, s.index_count, s.indexed, s.vertex_shader_hash,
         s.pixel_shader_hash, s.surface_pitch, MsaaName(s.msaa), s.edram_mode,
-        DepthFormatName(s.depth_format), s.depth_base,
-        ColorFormatName(s.color_formats[0]), s.color_bases[0],
-        ColorFormatName(s.color_formats[1]), s.color_bases[1],
-        ColorFormatName(s.color_formats[2]), s.color_bases[2],
-        ColorFormatName(s.color_formats[3]), s.color_bases[3]);
+        DepthFormatName(s.depth_format), s.depth_base, rt(s.color_formats[0]),
+        s.color_bases[0], rt(s.color_formats[1]), s.color_bases[1],
+        rt(s.color_formats[2]), s.color_bases[2], rt(s.color_formats[3]),
+        s.color_bases[3]);
   }
   std::fputs("]}\n", file_);
   // Flush every frame so the census survives a crash mid-run.

@@ -78,12 +78,26 @@ struct FrameRecord {
     }
   };
   std::unordered_map<SurfaceKey, uint32_t, SurfaceKeyHash> surface_configs;
-  // Distinct shader pair hashes, with draw counts.
-  std::unordered_map<std::string, uint32_t> shader_pairs;
-  // Primitive types used.
-  std::unordered_map<std::string, uint32_t> primitive_types;
-  // Resolve kinds this frame performed: "copy" or "clear" x color/depth x
-  // format, with counts.
+  // Distinct shader pair hashes, with draw counts. Struct-keyed, string
+  // form produced at EndFrame.
+  struct ShaderPairKey {
+    uint64_t vs;
+    uint64_t ps;
+    bool operator==(const ShaderPairKey &) const = default;
+  };
+  struct ShaderPairKeyHash {
+    size_t operator()(const ShaderPairKey &k) const {
+      return XXH3_64bits(&k, sizeof(k));
+    }
+  };
+  std::unordered_map<ShaderPairKey, uint32_t, ShaderPairKeyHash> shader_pairs;
+  // Primitive types used, counted by enum value (bounded, no strings per
+  // draw).
+  static constexpr uint32_t kMaxPrimitiveTypes = 64;
+  uint32_t primitive_counts[kMaxPrimitiveTypes] = {};
+  // Resolve kinds this frame performed: copy/clear x color/depth x format,
+  // plus the source and destination region of each copy (the EDRAM tile
+  // bases the broken-render analysis compares), keyed as one string.
   std::unordered_map<std::string, uint32_t> resolve_kinds;
   // The first N draws of the frame with full register context, for shader
   // and state decode work. Enough to seed the first translation work;
@@ -123,7 +137,9 @@ public:
                   uint32_t color_write_mask, xenos::PrimitiveType prim,
                   uint64_t vs_hash, uint64_t ps_hash, uint32_t index_count,
                   bool indexed);
-  void RecordResolve(const char *kind, bool depth, uint32_t format);
+  void RecordResolve(const char *kind, bool depth, uint32_t format,
+                     uint32_t src_select, uint32_t source_base,
+                     uint32_t dest_base, uint32_t dest_pitch);
   void RecordClear(bool depth, uint32_t format);
   void RecordSwap(uint32_t width, uint32_t height);
   void RecordSkipped(const std::string &reason);
