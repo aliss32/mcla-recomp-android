@@ -15,9 +15,10 @@ registers = ["r7", "r8", "r17", "r25", "r28"]
 
 # 0x82410E34 in sub_82410D70 (surface creation): rejects a surface whose end
 # exceeds 0x800 EDRAM tiles, the real console's capacity. One 720p MSAA tile
-# needs more. The runtime's virtual EDRAM is 4096 tiles, and the surface
-# header's base field is 12 bits, so up to 4096 is safe. r3 = base, r30 =
-# size, r11 = base + size; true jumps to the success branch.
+# needs more. The Android SDK patch enlarges the host EDRAM to 4096 tiles
+# (xenos::kEdramTileCount, see scripts/patch_rexglue_android.py) and the
+# surface header's base field is 12 bits, so up to 4096 is safe. r3 = base,
+# r30 = size, r11 = base + size; true jumps to the success branch.
 [[midasm_hook]]
 address = 0x82410E34
 name = "mcla_edram_limit"

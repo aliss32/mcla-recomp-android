@@ -46,6 +46,44 @@ def main():
     sdk_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rexglue-sdk"
     print(f"Applying Android patches to ReXGlue SDK at: {sdk_dir}")
 
+    # 0. Enlarge the host EDRAM to 4096 tiles (20 MiB).
+    #     The pinned SDK sizes the EDRAM buffer to the console's 2048 tiles
+    #     (xenos::kEdramTileCount) and every host EDRAM address wraps at
+    #     `& (kEdramTileCount - 1)` (the Xenos' 11-bit periodic tile addressing).
+    #     mcla-recomp renders the main scene as a single tile (LARecomp's
+    #     mcla_single_tile + mcla_edram_limit, config/render_perf.toml), which
+    #     needs about 2880 tiles at 720p 4x MSAA (depth + color). With the
+    #     2048-tile buffer the upper tiles wrapped onto tile 0 and rendered the
+    #     top half of the screen over the depth buffer: garbage in the upper
+    #     half, a correct bottom half. Enlarging the constant grows the EDRAM
+    #     buffer and widens every tile-address mask at once (they are all
+    #     written in terms of the constant); 20 MiB is nothing on a phone with
+    #     a 7c+ class GPU. Matches kHostEdramTiles in src/render_perf.cpp.
+    xenos_h = os.path.join(sdk_dir, "include", "rex", "graphics", "xenos.h")
+    if not os.path.exists(xenos_h):
+        print(f"[ERROR] Required header is missing: {xenos_h}")
+        return 1
+    with open(xenos_h, 'r', encoding='utf-8') as f:
+        xenos_content = f.read().replace('\r\n', '\n')
+    if 'kEdramTileCount = 4096' in xenos_content:
+        print('[SKIP] xenos.h: 4096-tile EDRAM already present')
+    else:
+        tile_old = 'constexpr uint32_t kEdramTileCount = 2048;'
+        tile_new = ('// 4096 tiles (20 MiB) instead of the console value of 2048:\n'
+                    '// mcla-recomp renders the main scene as one 720p 4x MSAA tile\n'
+                    '// of about 2880 tiles, which does not fit and wraps in a\n'
+                    '// 2048-tile EDRAM (REX_ANDROID_EDRAM_4096; see the Android\n'
+                    '// port src/render_perf.cpp). All host EDRAM address masks are\n'
+                    '// written in terms of this constant and follow it.\n'
+                    'constexpr uint32_t kEdramTileCount = 4096;')
+        if tile_old not in xenos_content:
+            print('[ERROR] xenos.h: kEdramTileCount anchor not found')
+            return 1
+        xenos_content = xenos_content.replace(tile_old, tile_new, 1)
+        with open(xenos_h, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(xenos_content)
+        print('[OK] xenos.h: host EDRAM enlarged to 4096 tiles')
+
     # 1. Root CMakeLists: clear library config postfixes on Android.
     #     SDLActivity loads libraries by fixed name (libSDL3.so, libmain.so,
     #     librexruntime.so, librexgpu-xenos.so). RelWithDebInfo would name them

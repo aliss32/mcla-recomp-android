@@ -7,6 +7,7 @@
 #include <thread>
 
 #include <rex/cvar.h>
+#include <rex/graphics/xenos.h>
 #include <rex/runtime.h>
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -22,8 +23,11 @@ namespace {
 
 // Tile count the game computed for the current frame.
 constexpr uint32_t kGuestTileCount = 0x827D42A4;
-// Size of the runtime's virtual EDRAM, in tiles. The console has 0x800.
-constexpr uint32_t kHostEdramTiles = 4096;
+// Host EDRAM, in tiles. The SDK buffer is xenos::kEdramTileCount, which the
+// Android patch enlarges from the console's 2048 to 4096 tiles so a
+// single-tile 720p 4x MSAA scene (about 2880 tiles of depth + color) fits
+// without wrapping onto tile 0. See scripts/patch_rexglue_android.py.
+constexpr uint32_t kHostEdramTiles = xenos::kEdramTileCount;
 
 }  // namespace
 
