@@ -291,7 +291,7 @@ void FrameCensusWriter::EndFrame() {
         std::fputc(',', file_);
       first = false;
       fmt::print(file_,
-                 "\"{},{};{},{},{},{};{};mask 0x{:04X};mode {};{}@{}\":{}",
+                 "\"{},{};{},{},{},{};{};mask 0x{:04X};mode {};base {}\":{}",
                  key.pitch, MsaaName(key.msaa), rt(key.color_formats[0]),
                  rt(key.color_formats[1]), rt(key.color_formats[2]),
                  rt(key.color_formats[3]), DepthFormatName(key.depth_format),
