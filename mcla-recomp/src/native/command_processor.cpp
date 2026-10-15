@@ -6,10 +6,8 @@
 #include <xxhash.h>
 
 #include <rex/cvar.h>
-#include <rex/graphics/util/draw.h>
 #include <rex/logging.h>
 #include <rex/memory.h>
-#include <rex/system/xmemory.h>
 
 #include "graphics_system.h"
 
@@ -26,7 +24,6 @@ inline std::string CensusPath() {
   return ::rex::cvar::Query<std::string>("mcla_native_census");
 }
 
-using xenos::EdramMode;
 using xenos::PrimitiveType;
 
 namespace {
@@ -118,42 +115,17 @@ Shader *MclaNativeCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return nullptr;
 }
 
-FrameCensusWriter::DrawSample MclaNativeCommandProcessor::SampleFromRegisters(
-    const RegisterFile &regs, xenos::PrimitiveType prim_type,
-    uint32_t index_count, bool indexed, uint64_t vs_hash, uint64_t ps_hash) {
-  FrameCensusWriter::DrawSample sample{};
-  sample.prim_type = uint32_t(prim_type);
-  sample.index_count = index_count;
-  sample.indexed = indexed;
-  sample.vertex_shader_hash = uint32_t(vs_hash);
-  sample.pixel_shader_hash = uint32_t(ps_hash);
-  const auto &surface = regs.Get<reg::RB_SURFACE_INFO>();
-  sample.surface_pitch = surface.surface_pitch;
-  sample.msaa = uint32_t(surface.msaa_samples);
-  sample.edram_mode = uint32_t(regs.Get<reg::RB_MODECONTROL>().edram_mode);
-  const auto &depth = regs.Get<reg::RB_DEPTH_INFO>();
-  sample.depth_format = uint32_t(depth.depth_format);
-  sample.depth_base = depth.depth_base | (depth.depth_base_bit_11 << 11);
-  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    uint32_t value = regs.Get<reg::RB_COLOR_INFO>(
-        reg::RB_COLOR_INFO::rt_register_indices[i]);
-    sample.color_formats[i] = UnpackColorFormat(value);
-    sample.color_bases[i] = UnpackColorBase(value);
-    sample.blend_control[i] = regs.Get<reg::RB_BLENDCONTROL>(
-        reg::RB_BLENDCONTROL::rt_register_indices[i]);
-  }
-  return sample;
-}
-
 bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
                                            uint32_t index_count,
                                            IndexBufferInfo *index_buffer_info,
                                            bool major_mode_explicit) {
   (void)major_mode_explicit;
-  // Record the surface configuration with the live register state at draw
-  // time: the key counts "draws made into this configuration", which is the
-  // reading the EDRAM/resolve analysis needs (the color/depth info registers
-  // are written after RB_SURFACE_INFO, so a write-time record would go stale).
+  // One census call per draw, sampling the live register state at draw
+  // time (the color/depth info registers are written after
+  // RB_SURFACE_INFO, so a write-time record would go stale). The write
+  // mask comes from RB_COLOR_MASK: which targets this draw actually
+  // writes, so unused targets with a format of 0 are not confused with a
+  // real 8_8_8_8 target.
   const auto &surface = register_file_->Get<reg::RB_SURFACE_INFO>();
   const auto &depth = register_file_->Get<reg::RB_DEPTH_INFO>();
   reg::RB_COLOR_INFO color[xenos::kMaxColorRenderTargets];
@@ -161,14 +133,13 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
     color[i].value = register_file_->Get<reg::RB_COLOR_INFO>(
         reg::RB_COLOR_INFO::rt_register_indices[i]);
   }
-  census_.RecordSurfaceConfig(
+  const uint32_t color_write_mask =
+      register_file_->Get<reg::RB_COLOR_MASK>().value & 0xFFFFu;
+  census_.RecordDraw(
       surface, color, depth,
-      uint32_t(register_file_->Get<reg::RB_MODECONTROL>().edram_mode));
-  census_.RecordPrimitive(prim_type);
-  census_.RecordShaderPair(current_vs_hash_, current_ps_hash_);
-  census_.RecordDrawSample(SampleFromRegisters(
-      *register_file_, prim_type, index_count, index_buffer_info != nullptr,
-      current_vs_hash_, current_ps_hash_));
+      uint32_t(register_file_->Get<reg::RB_MODECONTROL>().edram_mode),
+      color_write_mask, prim_type, current_vs_hash_, current_ps_hash_,
+      index_count, index_buffer_info != nullptr);
   // Stage 1 draws nothing; the census replaces the rasterized output.
   return true;
 }

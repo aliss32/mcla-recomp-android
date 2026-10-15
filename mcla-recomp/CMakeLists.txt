@@ -63,8 +63,12 @@ set_target_properties(rexgpu-mcla-native PROPERTIES
 target_include_directories(rexgpu-mcla-native PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${REXSDK_DIR}
+    # renderdoc_app.h: included by the SDK's Vulkan presenter headers.
+    ${REXSDK_DIR}/thirdparty/renderdoc
 )
-target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime)
+# xxhash.h comes from the vendored xxHash submodule through the xxHash::xxhash
+# target (the same dependency the Xenos plugin links).
+target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime xxHash::xxhash)
 if(TARGET Vulkan::Headers)
     target_link_libraries(rexgpu-mcla-native PRIVATE Vulkan::Headers)
 endif()
