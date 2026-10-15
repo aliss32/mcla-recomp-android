@@ -47,7 +47,14 @@ const char *ColorFormatName(uint32_t format) {
 }
 
 const char *DepthFormatName(uint32_t format) {
-  return format == 0 ? "D24S8" : "D24FS8";
+  switch (format) {
+  case 0:
+    return "D24S8";
+  case 1:
+    return "D24FS8";
+  default:
+    return "unknown";
+  }
 }
 
 const char *MsaaName(uint32_t samples) {
@@ -77,10 +84,21 @@ FrameCensusWriter::~FrameCensusWriter() {
 void FrameCensusWriter::SetEnabled(bool enabled,
                                    const std::filesystem::path &path) {
   std::lock_guard<std::mutex> lock(mutex_);
-  enabled_ = enabled && !path.empty();
   path_ = path;
-  if (enabled_ && !file_) {
+  if (!enabled || path.empty()) {
+    enabled_ = false;
+    return;
+  }
+  enabled_ = true;
+  if (!file_) {
     OpenFile();
+  }
+  // If the file could not be opened the census must not accumulate:
+  // Record* checks enabled(), which requires a live file handle.
+  if (!file_) {
+    enabled_ = false;
+    REXLOG_ERROR("mcla_native census: cannot open {}; the census is OFF",
+                 path.string());
   }
 }
 
@@ -89,7 +107,6 @@ void FrameCensusWriter::OpenFile() {
   std::filesystem::create_directories(path_.parent_path(), error);
   file_ = std::fopen(path_.string().c_str(), "wb");
   if (!file_) {
-    file_open_failed_ = true;
     REXLOG_ERROR("mcla_native census: cannot open {}", path_.string());
   }
 }
@@ -103,44 +120,56 @@ void FrameCensusWriter::BeginFrame() {
                rex::chrono::Clock::QueryHostTickFrequency());
 }
 
-void FrameCensusWriter::RecordSurfaceConfig(
+void FrameCensusWriter::RecordDraw(
     const reg::RB_SURFACE_INFO &surface, const reg::RB_COLOR_INFO (&color)[4],
-    const reg::RB_DEPTH_INFO &depth, uint32_t edram_mode) {
+    const reg::RB_DEPTH_INFO &depth, uint32_t edram_mode,
+    uint32_t color_write_mask, xenos::PrimitiveType prim, uint64_t vs_hash,
+    uint64_t ps_hash, uint32_t index_count, bool indexed) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
+  if (!enabled())
     return;
-  std::string key =
-      fmt::format("{},{},{},{},{},{},{},{},{}", surface.surface_pitch,
-                  MsaaName(uint32_t(surface.msaa_samples)),
-                  ColorFormatName(color[0].color_format),
-                  ColorFormatName(color[1].color_format),
-                  ColorFormatName(color[2].color_format),
-                  ColorFormatName(color[3].color_format),
-                  DepthFormatName(uint32_t(depth.depth_format)), edram_mode,
-                  depth.depth_base | (depth.depth_base_bit_11 << 11));
+  ++current_.draws;
+  // One struct-keyed lookup per draw; the string form is produced at
+  // EndFrame only.
+  FrameRecord::SurfaceKey key{};
+  key.pitch = surface.surface_pitch;
+  key.msaa = uint32_t(surface.msaa_samples);
+  key.color_write_mask = color_write_mask;
+  key.edram_mode = edram_mode;
+  key.depth_format = uint32_t(depth.depth_format);
+  key.depth_base = depth.depth_base | (depth.depth_base_bit_11 << 11);
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    key.color_formats[i] = uint32_t(color[i].color_format);
+  }
   ++current_.surface_configs[key];
-}
-
-void FrameCensusWriter::RecordShaderPair(uint64_t vs_hash, uint64_t ps_hash) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
-    return;
-  std::string key = fmt::format("{:016X}/{:016X}", vs_hash, ps_hash);
-  ++current_.shader_pairs[key];
-}
-
-void FrameCensusWriter::RecordPrimitive(xenos::PrimitiveType prim) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
-    return;
-  std::string key = fmt::format("{}", uint32_t(prim));
-  ++current_.primitive_types[key];
+  ++current_.primitive_types[fmt::format("{}", uint32_t(prim))];
+  ++current_.shader_pairs[fmt::format("{:016X}/{:016X}", vs_hash, ps_hash)];
+  if (current_.samples.size() < FrameRecord::kMaxSamplesPerFrame) {
+    FrameRecord::DrawSample sample{};
+    sample.prim_type = uint32_t(prim);
+    sample.index_count = index_count;
+    sample.indexed = indexed;
+    sample.vertex_shader_hash = uint32_t(vs_hash);
+    sample.pixel_shader_hash = uint32_t(ps_hash);
+    sample.surface_pitch = surface.surface_pitch;
+    sample.msaa = uint32_t(surface.msaa_samples);
+    sample.edram_mode = edram_mode;
+    sample.depth_format = key.depth_format;
+    sample.depth_base = key.depth_base;
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      sample.color_formats[i] = uint32_t(color[i].color_format);
+      sample.color_bases[i] =
+          color[i].color_base | (color[i].color_base_bit_11 << 11);
+      sample.blend_control[i] = 0; // filled by the caller if needed later
+    }
+    current_.samples.push_back(sample);
+  }
 }
 
 void FrameCensusWriter::RecordResolve(const char *kind, bool depth,
                                       uint32_t format) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
+  if (!enabled())
     return;
   ++current_.copies;
   const char *name = depth ? DepthFormatName(format) : ColorFormatName(format);
@@ -153,7 +182,7 @@ void FrameCensusWriter::RecordResolve(const char *kind, bool depth,
 
 void FrameCensusWriter::RecordClear(bool depth, uint32_t format) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
+  if (!enabled())
     return;
   ++current_.clears;
   const char *name = depth ? DepthFormatName(format) : ColorFormatName(format);
@@ -166,32 +195,22 @@ void FrameCensusWriter::RecordClear(bool depth, uint32_t format) {
 
 void FrameCensusWriter::RecordSkipped(const std::string &reason) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
+  if (!enabled())
     return;
   ++current_.skipped_reasons[reason];
 }
 
 void FrameCensusWriter::RecordSwap(uint32_t width, uint32_t height) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
+  if (!enabled())
     return;
   current_.swap_width = width;
   current_.swap_height = height;
 }
 
-void FrameCensusWriter::RecordDrawSample(FrameRecord::DrawSample sample) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_)
-    return;
-  ++current_.draws;
-  if (current_.samples.size() < FrameRecord::kMaxSamplesPerFrame) {
-    current_.samples.push_back(sample);
-  }
-}
-
 void FrameCensusWriter::EndFrame() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!enabled_ || !file_) {
+  if (!enabled()) {
     ++next_frame_;
     return;
   }
@@ -216,7 +235,21 @@ void FrameCensusWriter::EndFrame() {
     }
     std::fputc('}', file_);
   };
-  write_map("surfaces", r.surface_configs);
+  // Surface configs: convert the struct keys to their string form here, at
+  // one place and once per distinct configuration per frame.
+  std::fputs(",\"surfaces\":{", file_);
+  {
+    bool first = true;
+    for (const auto &[key, count] : r.surface_configs) {
+      if (!first)
+        std::fputc(',', file_);
+      first = false;
+      fmt::print(file_, "\"{},{};mask 0x{:02X};mode {};{}@{}\":{}", key.pitch,
+                 MsaaName(key.msaa), key.color_write_mask, key.edram_mode,
+                 DepthFormatName(key.depth_format), key.depth_base, count);
+    }
+    std::fputc('}', file_);
+  }
   write_map("shader_pairs", r.shader_pairs);
   write_map("primitives", r.primitive_types);
   write_map("resolves", r.resolve_kinds);

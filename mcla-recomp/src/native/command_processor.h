@@ -27,7 +27,6 @@
 
 // (clangd diagnostics in the IDE are expected: it has no SDK include path;
 // the CMake build compiles this cleanly)
-
 namespace rex::graphics::mcla_native {
 
 class MclaNativeGraphicsSystem;
@@ -45,11 +44,6 @@ public:
   void InvalidateGpuMemory() override;
 
   FrameCensusWriter &census() { return census_; }
-
-  static FrameCensusWriter::DrawSample
-  SampleFromRegisters(const RegisterFile &regs, xenos::PrimitiveType prim_type,
-                      uint32_t index_count, bool indexed, uint64_t vs_hash,
-                      uint64_t ps_hash);
 
 protected:
   bool SetupContext() override;

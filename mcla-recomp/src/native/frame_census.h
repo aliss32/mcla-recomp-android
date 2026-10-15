@@ -37,6 +37,10 @@
 #include <rex/graphics/xenos.h>
 #include <rex/types.h>
 
+// The SurfaceKey hash uses the vendored xxHash directly (header-only use);
+// the include dir comes from the xxHash::xxhash CMake target.
+#include <xxhash.h>
+
 namespace rex::graphics::mcla_native {
 
 class MclaNativeCommandProcessor;
@@ -55,11 +59,25 @@ struct FrameRecord {
   // Reason a draw was skipped or a resolve was dropped, for anything the
   // census could not classify - surfaced in EndFrame, never silent.
   std::unordered_map<std::string, uint32_t> skipped_reasons;
-  // Distinct surface configurations this frame drew into, as
-  // "pitch,msaa,rt0,rt1,rt2,rt3,depth,edram_mode,depth_base" keys with a
-  // count each. All four render target formats are in the key: MRT passes
-  // with different formats per target are distinct configurations.
-  std::unordered_map<std::string, uint32_t> surface_configs;
+  // Distinct surface configurations this frame drew into, with draw counts.
+  // Struct-keyed (converted to strings only at EndFrame) so a thousand-draw
+  // frame costs one hash lookup per draw, not four string builds.
+  struct SurfaceKey {
+    uint32_t pitch;
+    uint32_t msaa;
+    uint32_t color_formats[4];
+    uint32_t color_write_mask; // RB_COLOR_MASK: which targets are written
+    uint32_t depth_format;
+    uint32_t depth_base;
+    uint32_t edram_mode;
+    bool operator==(const SurfaceKey &) const = default;
+  };
+  struct SurfaceKeyHash {
+    size_t operator()(const SurfaceKey &k) const {
+      return XXH3_64bits(&k, sizeof(k));
+    }
+  };
+  std::unordered_map<SurfaceKey, uint32_t, SurfaceKeyHash> surface_configs;
   // Distinct shader pair hashes, with draw counts.
   std::unordered_map<std::string, uint32_t> shader_pairs;
   // Primitive types used.
@@ -95,18 +113,25 @@ public:
   ~FrameCensusWriter();
   void BeginFrame();
   void EndFrame();
-  void RecordDrawSample(FrameRecord::DrawSample sample);
-  void RecordSurfaceConfig(const reg::RB_SURFACE_INFO &surface,
-                           const reg::RB_COLOR_INFO (&color)[4],
-                           const reg::RB_DEPTH_INFO &depth,
-                           uint32_t edram_mode);
-  void RecordShaderPair(uint64_t vs_hash, uint64_t ps_hash);
-  void RecordPrimitive(xenos::PrimitiveType prim);
+  // One call per draw: records the surface configuration, primitive, shader
+  // pair and a bounded sample under a single lock. Thousand-draw frames are
+  // common, so the per-draw overhead is one lock and a struct-keyed map
+  // lookup; strings are only produced at EndFrame.
+  void RecordDraw(const reg::RB_SURFACE_INFO &surface,
+                  const reg::RB_COLOR_INFO (&color)[4],
+                  const reg::RB_DEPTH_INFO &depth, uint32_t edram_mode,
+                  uint32_t color_write_mask, xenos::PrimitiveType prim,
+                  uint64_t vs_hash, uint64_t ps_hash, uint32_t index_count,
+                  bool indexed);
   void RecordResolve(const char *kind, bool depth, uint32_t format);
   void RecordClear(bool depth, uint32_t format);
   void RecordSwap(uint32_t width, uint32_t height);
   void RecordSkipped(const std::string &reason);
   void SetEnabled(bool enabled, const std::filesystem::path &path);
+
+  // Whether the census is actually writing (file opened). Called only on
+  // the GPU thread, so no lock.
+  bool enabled() const { return enabled_ && file_ != nullptr; }
 
   // Convenience: DrawSample lives in FrameRecord.
   using DrawSample = FrameRecord::DrawSample;
@@ -115,14 +140,12 @@ private:
   FrameCensusWriter(const FrameCensusWriter &) = delete;
   FrameCensusWriter &operator=(const FrameCensusWriter &) = delete;
   void OpenFile();
-  bool enabled() const { return enabled_ && file_ != nullptr; }
   // Census runs on the GPU thread, but Shutdown flushes from any thread.
   std::mutex mutex_;
   void RecordSkippedLocked(const std::string &reason);
   FrameRecord current_;
   uint64_t next_frame_ = 1;
   bool enabled_ = false;
-  bool file_open_failed_ = false;
   std::filesystem::path path_;
   std::FILE *file_ = nullptr;
 };
