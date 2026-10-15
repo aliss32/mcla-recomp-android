@@ -129,11 +129,14 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
   }
   const uint32_t color_write_mask =
       register_file_->Get<reg::RB_COLOR_MASK>().value & 0xFFFFu;
+  const auto depth_control = register_file_->Get<reg::RB_DEPTHCONTROL>();
+  const bool depth_stencil_enabled =
+      depth_control.z_enable != 0 || depth_control.stencil_enable != 0;
   census_.RecordDraw(
       surface, color, depth,
       uint32_t(register_file_->Get<reg::RB_MODECONTROL>().edram_mode),
-      color_write_mask, prim_type, current_vs_hash_, current_ps_hash_,
-      index_count, index_buffer_info != nullptr);
+      color_write_mask, depth_stencil_enabled, prim_type, current_vs_hash_,
+      current_ps_hash_, index_count, index_buffer_info != nullptr);
   // Stage 1 draws nothing; the census replaces the rasterized output.
   return true;
 }
@@ -193,8 +196,9 @@ bool MclaNativeCommandProcessor::IssueCopy() {
 void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                            uint32_t frontbuffer_width,
                                            uint32_t frontbuffer_height) {
-  (void)frontbuffer_ptr;
-  census_.RecordSwap(frontbuffer_width, frontbuffer_height);
+  // The frontbuffer address is the core datum of the wrong-region analysis:
+  // compare it with the frame's last resolve "dest 0x..." key.
+  census_.RecordSwap(frontbuffer_width, frontbuffer_height, frontbuffer_ptr);
   census_.EndFrame();
   census_.BeginFrame();
   // The shader pair is deliberately NOT reset: the guest only re-uploads

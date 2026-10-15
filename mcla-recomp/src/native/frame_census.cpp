@@ -52,6 +52,8 @@ const char *DepthFormatName(uint32_t format) {
     return "D24S8";
   case 1:
     return "D24FS8";
+  case 0xFFu:
+    return "-"; // normalized: depth/stencil not used by the draw
   default:
     return "unknown";
   }
@@ -115,16 +117,22 @@ void FrameCensusWriter::BeginFrame() {
   std::lock_guard<std::mutex> lock(mutex_);
   current_ = FrameRecord{};
   current_.frame = next_frame_;
+  // Microseconds since boot, computed without overflowing the 64-bit
+  // intermediate: QueryHostTickCount() * 1e6 would wrap after ~5 hours on
+  // a 1 GHz counter, and Android's counter runs since boot.
+  const uint64_t ticks = rex::chrono::Clock::QueryHostTickCount();
+  const uint64_t freq = rex::chrono::Clock::QueryHostTickFrequency();
   current_.guest_time_us =
-      uint64_t(rex::chrono::Clock::QueryHostTickCount() * 1000000ull /
-               rex::chrono::Clock::QueryHostTickFrequency());
+      freq ? (ticks / freq) * 1000000ull + (ticks % freq) * 1000000ull / freq
+           : 0;
 }
 
 void FrameCensusWriter::RecordDraw(
     const reg::RB_SURFACE_INFO &surface, const reg::RB_COLOR_INFO (&color)[4],
     const reg::RB_DEPTH_INFO &depth, uint32_t edram_mode,
-    uint32_t color_write_mask, xenos::PrimitiveType prim, uint64_t vs_hash,
-    uint64_t ps_hash, uint32_t index_count, bool indexed) {
+    uint32_t color_write_mask, bool depth_stencil_enabled,
+    xenos::PrimitiveType prim, uint64_t vs_hash, uint64_t ps_hash,
+    uint32_t index_count, bool indexed) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!enabled())
     return;
@@ -136,8 +144,17 @@ void FrameCensusWriter::RecordDraw(
   key.msaa = uint32_t(surface.msaa_samples);
   key.color_write_mask = color_write_mask;
   key.edram_mode = edram_mode;
-  key.depth_format = uint32_t(depth.depth_format);
-  key.depth_base = depth.depth_base | (depth.depth_base_bit_11 << 11);
+  // Same normalization as the color targets: with both depth and stencil
+  // tests disabled the depth format/base are not part of what the draw
+  // reads or writes, so they are 0xFF/0 rather than splitting otherwise
+  // identical configurations over a stale base.
+  if (depth_stencil_enabled) {
+    key.depth_format = uint32_t(depth.depth_format);
+    key.depth_base = depth.depth_base | (depth.depth_base_bit_11 << 11);
+  } else {
+    key.depth_format = 0xFFu;
+    key.depth_base = 0;
+  }
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     // Normalize: an unwritten target (mask nibble 0) is 0xFF, so it is
     // never confused with a real format (0 = 8_8_8_8) in the key.
@@ -219,12 +236,14 @@ void FrameCensusWriter::RecordSkipped(const std::string &reason) {
   ++current_.skipped_reasons[reason];
 }
 
-void FrameCensusWriter::RecordSwap(uint32_t width, uint32_t height) {
+void FrameCensusWriter::RecordSwap(uint32_t width, uint32_t height,
+                                   uint32_t frontbuffer_ptr) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!enabled())
     return;
   current_.swap_width = width;
   current_.swap_height = height;
+  current_.swap_ptr = frontbuffer_ptr;
 }
 
 void FrameCensusWriter::EndFrame() {
@@ -236,9 +255,10 @@ void FrameCensusWriter::EndFrame() {
   FrameRecord &r = current_;
   std::string line =
       fmt::format("{{\"frame\":{},\"guest_time_us\":{},\"swap\":"
-                  "[{},{}],\"draws\":{},\"copies\":{},\"clears\":{},",
+                  "[{},{}],\"swap_ptr\":\"0x{:08X}\",\"draws\":{},"
+                  "\"copies\":{},\"clears\":{},",
                   r.frame, r.guest_time_us, r.swap_width, r.swap_height,
-                  r.draws, r.copies, r.clears);
+                  r.swap_ptr, r.draws, r.copies, r.clears);
   std::fwrite(line.data(), 1, line.size(), file_);
   auto write_map = [this](const char *name,
                           const std::unordered_map<std::string, uint32_t> &m) {
