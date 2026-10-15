@@ -45,6 +45,24 @@ namespace rex::graphics::mcla_native {
 
 class MclaNativeCommandProcessor;
 class MclaNativeGraphicsSystem;
+
+// One resolve (copy): source target/format/base in EDRAM and the guest
+// destination region, plus the destination texture format fields. Recorded
+// in order; the last one before a swap is what swap_ptr should match.
+struct ResolveInfo {
+  const char *kind = "copy";
+  bool depth = false;
+  uint32_t format = 0; // source RT/depth format
+  uint32_t src_select = 0;
+  uint32_t src_base = 0;  // EDRAM tile base
+  uint32_t dest_base = 0; // RB_COPY_DEST_BASE (raw guest address)
+  uint32_t dest_pitch = 0;
+  uint32_t dest_height = 0;
+  uint32_t dest_format = 0; // RB_COPY_DEST_INFO.copy_dest_format
+  uint32_t dest_endian = 0;
+  uint32_t dest_swap = 0;
+  uint32_t dest_number = 0;
+};
 // ---------------------------------------------------------------------------
 // Frame census writer
 // ---------------------------------------------------------------------------
@@ -102,6 +120,12 @@ struct FrameRecord {
   // plus the source and destination region of each copy (the EDRAM tile
   // bases the broken-render analysis compares), keyed as one string.
   std::unordered_map<std::string, uint32_t> resolve_kinds;
+  // Resolve order is preserved: the last resolve before the swap is what
+  // swap_ptr must match. resolve_log keeps the first N resolves in order,
+  // each prefixed with the draw count at the time.
+  std::string last_resolve;
+  std::vector<std::string> resolve_log;
+  static constexpr size_t kMaxResolveLog = 32;
   // The first N draws of the frame with full register context, for shader
   // and state decode work. Enough to seed the first translation work;
   // aggregates cover the rest.
@@ -140,9 +164,7 @@ public:
                   uint32_t color_write_mask, bool depth_stencil_enabled,
                   xenos::PrimitiveType prim, uint64_t vs_hash, uint64_t ps_hash,
                   uint32_t index_count, bool indexed);
-  void RecordResolve(const char *kind, bool depth, uint32_t format,
-                     uint32_t src_select, uint32_t source_base,
-                     uint32_t dest_base, uint32_t dest_pitch);
+  void RecordResolve(const ResolveInfo &info);
   void RecordClear(bool depth, uint32_t format);
   void RecordSwap(uint32_t width, uint32_t height, uint32_t frontbuffer_ptr);
   void RecordSkipped(const std::string &reason);

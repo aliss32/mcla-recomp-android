@@ -195,24 +195,28 @@ void FrameCensusWriter::RecordDraw(
   }
 }
 
-void FrameCensusWriter::RecordResolve(const char *kind, bool depth,
-                                      uint32_t format, uint32_t src_select,
-                                      uint32_t src_base, uint32_t dest_base,
-                                      uint32_t dest_pitch) {
+void FrameCensusWriter::RecordResolve(const ResolveInfo &i) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!enabled())
     return;
   ++current_.copies;
-  const char *name = depth ? DepthFormatName(format) : ColorFormatName(format);
-  // The resolve key carries the EDRAM region the copy reads (the source
-  // base at the copied target) and the guest destination (base + pitch),
-  // which is what the broken-render analysis compares against the swap.
-  std::string key =
-      fmt::format("{}_{};src_sel {}@0x{:05X};dest 0x{:05X},pitch {}", kind,
-                  name, src_select, src_base, dest_base, dest_pitch);
+  const char *name =
+      i.depth ? DepthFormatName(i.format) : ColorFormatName(i.format);
+  std::string key = fmt::format(
+      "{}_{};src_sel {}@0x{:05X};dest 0x{:08X},pitch {},h {};"
+      "dfmt {},endian {},swap {},num {}",
+      i.kind, name, i.src_select, i.src_base, i.dest_base, i.dest_pitch,
+      i.dest_height, i.dest_format, i.dest_endian, i.dest_swap, i.dest_number);
   ++current_.resolve_kinds[key];
+  current_.last_resolve = key;
+  if (current_.resolve_log.size() < FrameRecord::kMaxResolveLog) {
+    // Prefixed with the draw count at the time, so the resolve's position
+    // within the frame is visible.
+    current_.resolve_log.push_back(
+        fmt::format("after_draw {};{}", current_.draws, key));
+  }
   if (std::string_view(name) == "unknown") {
-    RecordSkippedLocked(fmt::format("resolve_format_{}", format));
+    RecordSkippedLocked(fmt::format("resolve_format_{}", i.format));
   }
 }
 
@@ -323,6 +327,18 @@ void FrameCensusWriter::EndFrame() {
   }
   write_map("resolves", r.resolve_kinds);
   write_map("skipped", r.skipped_reasons);
+  fmt::print(file_, ",\"last_resolve\":\"{}\",\"resolve_log\":[",
+             r.last_resolve);
+  {
+    bool first = true;
+    for (const auto &entry : r.resolve_log) {
+      if (!first)
+        std::fputc(',', file_);
+      first = false;
+      fmt::print(file_, "\"{}\"", entry);
+    }
+  }
+  std::fputc(']', file_);
   std::fputs(",\"samples\":[", file_);
   bool first_sample = true;
   for (const auto &s : r.samples) {

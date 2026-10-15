@@ -34,6 +34,12 @@ uint32_t UnpackColorFormat(uint32_t value) {
   return uint32_t(info.color_format);
 }
 
+uint32_t UnpackColorBase(uint32_t value) {
+  reg::RB_COLOR_INFO info;
+  info.value = value;
+  return info.color_base | (info.color_base_bit_11 << 11);
+}
+
 } // namespace
 
 MclaNativeCommandProcessor::MclaNativeCommandProcessor(
@@ -162,30 +168,37 @@ bool MclaNativeCommandProcessor::IssueCopy() {
                    reg::RB_COLOR_INFO::rt_register_indices[rt])));
   }
   if (copy_control.copy_command != xenos::CopyCommand::kNull) {
-    uint32_t format;
-    uint32_t source_base;
+    // Raw register reads (Get<> vs union ambiguity avoided) for the full
+    // resolve description: source target/format/base in EDRAM and the
+    // guest destination region with its texture format fields.
+    ResolveInfo info;
+    info.depth = copying_depth;
+    info.src_select = copy_control.copy_src_select;
     if (copying_depth) {
-      format = uint32_t(register_file_->Get<reg::RB_DEPTH_INFO>().depth_format);
-      const auto &depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
-      source_base =
+      reg::RB_DEPTH_INFO depth_info;
+      depth_info.value = (*register_file_)[XE_GPU_REG_RB_DEPTH_INFO];
+      info.format = uint32_t(depth_info.depth_format);
+      info.src_base =
           depth_info.depth_base | (depth_info.depth_base_bit_11 << 11);
     } else {
-      const auto color_info = register_file_->Get<reg::RB_COLOR_INFO>(
-          reg::RB_COLOR_INFO::rt_register_indices[copy_control
-                                                      .copy_src_select]);
-      format = UnpackColorFormat(color_info.value);
-      source_base =
-          color_info.color_base | (color_info.color_base_bit_11 << 11);
+      const uint32_t raw =
+          (*register_file_)[reg::RB_COLOR_INFO::rt_register_indices
+                                [copy_control.copy_src_select]];
+      info.format = UnpackColorFormat(raw);
+      info.src_base = UnpackColorBase(raw);
     }
-    // The destination region in guest memory: what the swap will read back.
-    // RB_COPY_DEST_BASE has a register index but no union struct, so it is
-    // read as the raw value; pitch is in pixels per RB_COPY_DEST_PITCH.
-    const uint32_t dest_base = (*register_file_)[XE_GPU_REG_RB_COPY_DEST_BASE];
-    const auto dest_pitch =
-        register_file_->Get<reg::RB_COPY_DEST_PITCH>().copy_dest_pitch;
-    census_.RecordResolve("copy", copying_depth, format,
-                          copy_control.copy_src_select, source_base, dest_base,
-                          dest_pitch);
+    info.dest_base = (*register_file_)[XE_GPU_REG_RB_COPY_DEST_BASE];
+    reg::RB_COPY_DEST_PITCH dest_pitch;
+    dest_pitch.value = (*register_file_)[XE_GPU_REG_RB_COPY_DEST_PITCH];
+    info.dest_pitch = dest_pitch.copy_dest_pitch;
+    info.dest_height = dest_pitch.copy_dest_height;
+    reg::RB_COPY_DEST_INFO dest_info;
+    dest_info.value = (*register_file_)[XE_GPU_REG_RB_COPY_DEST_INFO];
+    info.dest_format = uint32_t(dest_info.copy_dest_format);
+    info.dest_endian = uint32_t(dest_info.copy_dest_endian);
+    info.dest_swap = uint32_t(dest_info.copy_dest_swap);
+    info.dest_number = uint32_t(dest_info.copy_dest_number);
+    census_.RecordResolve(info);
   } else if (!copy_control.color_clear_enable &&
              !copy_control.depth_clear_enable) {
     census_.RecordSkipped("copy_noop");
