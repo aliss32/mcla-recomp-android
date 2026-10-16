@@ -4,6 +4,8 @@
 #include <cinttypes>
 #include <cstring>
 
+#include <fmt/format.h>
+
 #include <rex/logging.h>
 
 namespace rex::graphics::mcla_native {
@@ -60,27 +62,44 @@ void RenderTargetManager::Shutdown() {
   device_ = nullptr;
 }
 
-VkFormat RenderTargetManager::HostColorFormat(uint32_t guest_color_format) {
-  // ColorFormat numbers per xenos.h:543-565 (k_8_8_8_8=6,
-  // k_2_10_10_10=7, k_16_16=26, k_16_16_16_16_FLOAT=32,
-  // k_32_FLOAT=36) and ColorRenderTargetFormat xenos.h:298-318
-  // (k_8_8_8_8=0, k_2_10_10_10_FLOAT=3, k_16_16_16_16=5,
-  // k_16_16_16_16_FLOAT=7).
-  switch (guest_color_format) {
-  case 0: // ColorRenderTargetFormat::k_8_8_8_8 (also ColorFormat 6)
-  case 6:
+VkFormat
+RenderTargetManager::HostFormatFromRT(uint32_t guest_rt_format) {
+  // ColorRenderTargetFormat numbers per xenos.h:298-318.
+  switch (guest_rt_format) {
+  case 0: // k_8_8_8_8
+  case 1: // k_8_8_8_8_GAMMA (same storage)
     return VK_FORMAT_R8G8B8A8_UNORM;
   case 3: // k_2_10_10_10_FLOAT (7e3) -> f16x4 storage (SDK parity)
-  case 7: // ColorFormat k_2_10_10_10
     return VK_FORMAT_R16G16B16A16_SFLOAT;
-  case 5: // k_16_16 fixed point -> snorm (SDK parity)
-  case 26:
+  case 4: // k_16_16 fixed point -> snorm (SDK parity)
+  case 5: // k_16_16_16_16
     return VK_FORMAT_R16G16B16A16_SNORM;
-  case 8: // ColorRenderTargetFormat::k_16_16_16_16_FLOAT
-  case 32: // ColorFormat k_16_16_FLOAT
+  case 7: // k_16_16_FLOAT
     return VK_FORMAT_R16G16B16A16_SFLOAT;
   case 14: // k_32_FLOAT
-  case 36:
+    return VK_FORMAT_R32_SFLOAT;
+  default:
+    return VK_FORMAT_UNDEFINED;
+  }
+}
+
+VkFormat RenderTargetManager::HostFormatFromTextureFormat(
+    uint32_t guest_color_format) {
+  // ColorFormat numbers per xenos.h:537-565 (k_8_8_8_8=6,
+  // k_2_10_10_10=7, k_16_16=26, k_16_16_16_16_FLOAT=32,
+  // k_32_FLOAT=36). Note 0 is NOT a valid ColorFormat here - the old
+  // single-table mapping conflated RT format 0 with ColorFormat 6.
+  switch (guest_color_format) {
+  case 6: // k_8_8_8_8
+  case 14: // k_8_8_8_8_A (same 32bpp RGBA8 storage)
+    return VK_FORMAT_R8G8B8A8_UNORM;
+  case 7: // k_2_10_10_10 -> f16x4 storage (SDK parity)
+    return VK_FORMAT_R16G16B16A16_SFLOAT;
+  case 26: // k_16_16 -> snorm (SDK parity)
+    return VK_FORMAT_R16G16B16A16_SNORM;
+  case 32: // k_16_16_FLOAT
+    return VK_FORMAT_R16G16B16A16_SFLOAT;
+  case 36: // k_32_FLOAT
     return VK_FORMAT_R32_SFLOAT;
   default:
     return VK_FORMAT_UNDEFINED;
@@ -143,9 +162,8 @@ RenderTargetManager::RenderTarget *RenderTargetManager::GetOrCreateRenderTarget(
   }
 
   const VkFormat host_format =
-      is_depth ? HostDepthFormat(guest_format) : HostColorFormat(guest_format);
+      is_depth ? HostDepthFormat(guest_format) : HostFormatFromRT(guest_format);
   if (host_format == VK_FORMAT_UNDEFINED) {
-    LogOnce("rt_unknown_format");
     REXLOG_WARN("stage2.2: unmapped RT guest format {} (depth={})",
                 guest_format, is_depth);
     return nullptr;
@@ -251,9 +269,8 @@ RenderTargetManager::GetOrCreateResolveTexture(uint32_t dest_base,
     return nullptr;
   }
 
-  const VkFormat host_format = HostColorFormat(guest_format);
+  const VkFormat host_format = HostFormatFromTextureFormat(guest_format);
   if (host_format == VK_FORMAT_UNDEFINED) {
-    LogOnce("resolve_unknown_format");
     REXLOG_WARN("stage2.2: unmapped resolve dest guest format {}",
                 guest_format);
     return nullptr;
@@ -348,12 +365,30 @@ RenderTargetManager::FindRenderTarget(uint32_t edram_base) {
 }
 
 void RenderTargetManager::LogOnce(const char *what) {
-  // A tiny per-message throttle: log the first occurrence of each distinct
-  // problem with a global cap so a pathological frame cannot spam the log.
-  if (logged_format_warnings_ < 32) {
-    REXLOG_WARN("stage2.2: {}", what);
-    ++logged_format_warnings_;
+  LogThrottledKey(what, fmt::format("stage2.2: {}", what));
+}
+
+void RenderTargetManager::LogThrottledKey(const char *key,
+                                           const std::string &message) {
+  uint32_t slot = kMaxLogKeys;
+  for (uint32_t i = 0; i < log_key_count_; ++i) {
+    if (std::strcmp(log_keys_[i], key) == 0) {
+      slot = i;
+      break;
+    }
   }
+  if (slot == kMaxLogKeys) {
+    if (log_key_count_ >= kMaxLogKeys) {
+      return;
+    }
+    slot = log_key_count_++;
+    log_keys_[slot] = key;
+  }
+  if (log_key_counts_[slot] >= kMaxLogsPerKey) {
+    return;
+  }
+  ++log_key_counts_[slot];
+  REXLOG_WARN("{}", message);
 }
 
 } // namespace rex::graphics::mcla_native

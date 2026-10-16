@@ -305,47 +305,102 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
   // counted and skipped.
   if (copying_depth) {
     ++skipped_conv;
-    if (rt_manager_.log_throttle()) {
-      REXLOG_WARN("stage2.2: depth resolve skipped (src fmt {} dest fmt {})",
-                  src_format, dest_format);
-    }
+    rt_manager_.LogThrottledKey(
+        "depth_resolve_skipped",
+        fmt::format("stage2.2: depth resolve skipped (src fmt {} dest fmt {})",
+                    src_format, dest_format));
     return;
   }
 
   // Format-preserving resolve only (census: 8_8_8_8 -> 8_8_8_8 is the
   // dominant case; 2_10_10_10_FLOAT -> 8_8_8_8 etc. need shader conversion).
-  // ColorFormat numbers: 6 = k_8_8_8_8 (xenos.h:548).
-  const bool same_format =
-      (src_format == dest_format) ||
-      (src_format == 0 &&
-       dest_format == 6); // RT k_8_8 == dest ColorFormat k_8_8
+  // Compare via the SDK's own equivalence rule: the source is a
+  // ColorRenderTargetFormat, the destination a ColorFormat - two distinct
+  // enum spaces (RT 0 = k_8_8 vs dest 6 = k_8_8) - so the old numeric
+  // equality check misclassified everything except the accidental
+  // collision. IsColorResolveFormatBitwiseEquivalent (xenos.h:569)
+  // implements exactly this comparison.
+  const bool same_format = xenos::IsColorResolveFormatBitwiseEquivalent(
+      xenos::ColorRenderTargetFormat(src_format),
+      xenos::ColorFormat(dest_format));
   if (!same_format) {
     ++skipped_conv;
-    if (rt_manager_.log_throttle()) {
-      REXLOG_WARN("stage2.2: conversion resolve skipped (src fmt {} dest fmt "
-                  "{} swap {})",
-                  src_format, dest_format, swap_mode);
-    }
+    rt_manager_.LogThrottledKey(
+        "conversion_resolve_skipped",
+        fmt::format("stage2.2: conversion resolve skipped (src fmt {} dest "
+                    "fmt {} swap {})",
+                    src_format, dest_format, swap_mode));
     return;
   }
 
-  RenderTargetManager::RenderTarget *src_rt =
-      rt_manager_.FindRenderTarget(src_base);
-  if (!src_rt) {
-    // The RT is only known after draws have been applied to it (stage 2.3);
-    // without a source RT the resolve produces nothing yet. Logged once per
-    // base via the manager's throttle.
-    rt_manager_.LogOnce("resolve_without_source_rt");
-    return;
+  // Stage 2.2b: the RT is created on demand from the resolve's own source
+  // description (pitch/msaa/format from color_edram_info, extent from the
+  // copy region). Nothing has rendered into it yet, so the resolve would
+  // carry garbage - instead the drain path fills newly created RTs with a
+  // fixed debug color so the chain resolve -> present is proven end to end.
+  const uint32_t src_pitch_tiles = src_edram.pitch_tiles;
+  const uint32_t src_msaa = uint32_t(src_edram.msaa_samples);
+  const uint32_t src_bpp =
+      RenderTargetManager::GuestFormatBytesPerPixel(src_format);
+  // EDRAM pitch is in tiles (32-byte units) per draw.h:341-343.
+  const uint32_t src_pitch_bytes = src_pitch_tiles * 32;
+  const uint32_t src_width = src_bpp ? src_pitch_bytes / src_bpp : 0;
+  RenderTargetManager::RenderTarget *src_rt = rt_manager_.FindRenderTarget(src_base);
+  const bool rt_created = src_rt == nullptr;
+  if (rt_created) {
+    src_rt = rt_manager_.GetOrCreateRenderTarget(
+        src_base, src_pitch_bytes, src_msaa, /*is_depth=*/false, src_format,
+        src_width ? src_width : width_px, height_px);
+    if (!src_rt) {
+      rt_manager_.LogThrottledKey(
+          "rt_create_failed",
+          fmt::format("stage2.2: on-demand RT creation failed (base 0x{:08X} "
+                      "fmt {} pitch_tiles {} msaa {})",
+                      src_base, src_format, src_pitch_tiles, src_msaa));
+      return;
+    }
+    REXLOG_INFO("stage2.2: RT created on demand base=0x{:08X} "
+                "pitch_tiles={} msaa={} fmt={} {}x{}", src_base,
+                src_pitch_tiles, src_msaa, src_format, src_rt->width,
+                src_rt->height);
   }
 
   RenderTargetManager::ResolveTexture *dest_tex =
-      rt_manager_.GetOrCreateResolveTexture(info.copy_dest_base, dest_pitch,
-                                            height_px, dest_format, swap_mode);
+      rt_manager_.FindResolveTexture(info.copy_dest_base);
+  const bool tex_created = dest_tex == nullptr;
+  dest_tex = rt_manager_.GetOrCreateResolveTexture(
+      info.copy_dest_base, dest_pitch, height_px, dest_format, swap_mode);
   if (!dest_tex) {
-    rt_manager_.LogOnce("resolve_dest_unavailable");
+    rt_manager_.LogThrottledKey(
+        "resolve_dest_unavailable",
+        fmt::format("stage2.2: resolve dest unavailable (dest 0x{:08X} fmt "
+                    "{} pitch {})",
+                    info.copy_dest_base, dest_format, dest_pitch));
     return;
   }
+
+  if (frame_resolve_logs_ < 10 || (census_frame_count_ % 60) == 0) {
+    REXLOG_INFO("stage2.2 frame {}: resolve src=0x{:08X} pitch_tiles={} msaa={} "
+                "src_fmt={} dest=0x{:08X} dest_pitch={} dest_fmt={} swap={} "
+                "rt={} tex={}",
+                census_frame_count_, src_base, src_pitch_tiles, src_msaa,
+                src_format, info.copy_dest_base, dest_pitch, dest_format,
+                swap_mode, rt_created ? "created" : "found",
+                tex_created ? "created" : "found");
+    ++frame_resolve_logs_;
+  }
+
+  // Debug fill: freshly created RTs carry no drawn content yet (stage 2.3
+  // brings real draws); fill the newly created RT with a fixed color per
+  // swap_ptr so the presented frame visibly proves the resolve -> present
+  // chain. Color-format RT only; an MSAA RT still goes through the normal
+  // vkCmdResolveImage path afterwards.
+  pending_resolve_debug_clear_ = rt_created;
+  pending_resolve_debug_color_ =
+      src_base == 0x07C48000   ? std::array<float, 4>{1.0f, 0.0f, 0.0f, 1.0f}
+      : src_base == 0x08378000 ? std::array<float, 4>{0.0f, 0.0f, 1.0f, 1.0f}
+                               : std::array<float, 4>{
+                                     0.0f, 1.0f, 0.0f, 1.0f}; // any other base
 
   // Queue the resolve into the present command buffer (single submission per
   // swap). Layout: source RT TRANSFER_SRC_OPTIMAL, dest UNDEFINED ->
@@ -443,6 +498,7 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // registered texture the frame presents black (logged, never a fallback to
   // the stage 2.1 color test).
   const uint64_t frame = census_frame_count_;
+  frame_resolve_logs_ = 0;
   RenderTargetManager::ResolveTexture *present_texture =
       rt_manager_.FindResolveTexture(frontbuffer_ptr);
   if (!present_texture) {
@@ -531,67 +587,36 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
               nullptr, 1, &acquire_barrier);
 
-          if (present_texture) {
-            // Barrier the resolve texture to SHADER_READ_ONLY_OPTIMAL, draw
-            // the fullscreen triangle sampling it, then leave it in that
-            // layout (it will be resolved into again next frame - a
-            // subsequent resolve barriers it back). For 2.2 the texture is
-            // sampled with its unswizzled content: guest swap mode 1 is R/B
-            // swap; the swap pass shader has an rb_swap specialization that
-            // flips r/b. A transform image view does the swizzle when the
-            // driver does not.
-            VkImageMemoryBarrier tex_acquire = {};
-            tex_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            tex_acquire.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            tex_acquire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            tex_acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            tex_acquire.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            tex_acquire.image = present_texture->image;
-            tex_acquire.subresourceRange = subresource_range;
-            dfn.vkCmdPipelineBarrier(present_command_buffer_,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                                     0, nullptr, 0, nullptr, 1, &tex_acquire);
-
-            const bool rb_swap_needed = present_texture->needs_rb_swap;
-            VkImageView src_view = present_texture->view;
-            present_pass_.Draw(vulkan_device, present_command_buffer_, src_view,
-                               rb_swap_needed, width, height);
-          } else {
-            // No texture: clear to black. No fallback to the color test.
-            VkRenderingAttachmentInfo attachment_info = {};
-            attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            attachment_info.imageView = vulkan_context.image_view();
-            attachment_info.imageLayout =
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachment_info.clearValue.color = {0.0f, 0.0f, 0.0f, 1.0f};
-
-            VkRenderingInfo rendering_info = {};
-            rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-            rendering_info.renderArea.offset = {0, 0};
-            rendering_info.renderArea.extent = {width, height};
-            rendering_info.layerCount = 1;
-            rendering_info.colorAttachmentCount = 1;
-            rendering_info.pColorAttachments = &attachment_info;
-            dfn.vkCmdBeginRendering(present_command_buffer_, &rendering_info);
-            dfn.vkCmdEndRendering(present_command_buffer_);
-          }
-
-          // Drain the pending resolve into this submission, before the
-          // present sampling so the presented image carries THIS frame's
+          // Stage 2.2b: the pending resolve is drained FIRST (before the
+          // present sampling), so the presented image carries THIS frame's
           // resolved contents (census-verified contract: last resolve dest ==
           // swap_ptr, and the swap samples exactly that texture).
+          pending_resolve_drained_ = false;
           if (pending_resolve_dst_image_ != VK_NULL_HANDLE) {
+            // Destination (resolve texture): TRANSFER_DST_OPTIMAL for the
+            // write. The real previous layout is tracked: UNDEFINED only
+            // when the texture has never been written before (first resolve
+            // into it); SHADER_READ_ONLY_OPTIMAL after a previous frame's
+            // present sampled it. Using UNDEFINED unconditionally would
+            // discard the previous contents - harmless when it is about to
+            // be fully overwritten, but validation flags the mismatch.
             VkImageMemoryBarrier dst_acquire = {};
             dst_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            dst_acquire.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            dst_acquire.srcAccessMask =
+                last_presented_texture_layout_ ==
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    ? VK_ACCESS_SHADER_READ_BIT
+                    : 0;
             dst_acquire.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            dst_acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            dst_acquire.oldLayout = last_presented_texture_layout_;
             dst_acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             dst_acquire.image = pending_resolve_dst_image_;
             dst_acquire.subresourceRange = subresource_range;
+
+            // Source (the RT): the content written by the guest draws is
+            // discarded in this 2.2b build, so UNDEFINED -> TRANSFER_SRC is
+            // correct here regardless of history (a fixed debug color is
+            // cleared in below, between these barriers and the resolve).
             VkImageMemoryBarrier src_acquire = {};
             src_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             src_acquire.srcAccessMask =
@@ -616,15 +641,6 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
                 drain_barriers);
 
-            VkImageResolve resolve_region = {};
-            resolve_region.srcSubresource.aspectMask =
-                src_acquire.subresourceRange.aspectMask;
-            resolve_region.srcSubresource.layerCount = 1;
-            resolve_region.dstSubresource.aspectMask =
-                VK_IMAGE_ASPECT_COLOR_BIT;
-            resolve_region.dstSubresource.layerCount = 1;
-            resolve_region.extent = {pending_resolve_width_,
-                                     pending_resolve_height_, 1};
             // These two transfer commands are absent from the SDK's
             // VulkanDevice::Functions (device_1_0.inc has only
             // vkCmdClearColorImage/vkCmdCopyImageToBuffer; the Xenos plugin
@@ -652,6 +668,34 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               }
             }
             if (pending_resolve_dst_image_ != VK_NULL_HANDLE) {
+              // Stage 2.2b debug fill: when the resolve source RT was just
+              // created (no real draw has written it yet), clear it to a
+              // fixed color AFTER the barrier, BEFORE the resolve, so the
+              // presented frame carries that color through the resolve ->
+              // present chain. vkCmdClearColorImage is in the SDK's
+              // Functions (device_1_0.inc). Color format RT only; MSAA still
+              // resolves through the normal path afterwards.
+              if (pending_resolve_debug_clear_ &&
+                  !pending_resolve_src_is_depth_) {
+                VkClearColorValue clear_value = {};
+                clear_value.float32[0] = pending_resolve_debug_color_[0];
+                clear_value.float32[1] = pending_resolve_debug_color_[1];
+                clear_value.float32[2] = pending_resolve_debug_color_[2];
+                clear_value.float32[3] = pending_resolve_debug_color_[3];
+                dfn.vkCmdClearColorImage(
+                    present_command_buffer_, pending_resolve_src_image_,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, &clear_value, 1,
+                    &src_acquire.subresourceRange);
+              }
+              VkImageResolve resolve_region = {};
+              resolve_region.srcSubresource.aspectMask =
+                  src_acquire.subresourceRange.aspectMask;
+              resolve_region.srcSubresource.layerCount = 1;
+              resolve_region.dstSubresource.aspectMask =
+                  VK_IMAGE_ASPECT_COLOR_BIT;
+              resolve_region.dstSubresource.layerCount = 1;
+              resolve_region.extent = {pending_resolve_width_,
+                                       pending_resolve_height_, 1};
               if (pending_resolve_src_msaa_ >= 2) {
                 transfer_resolve_(present_command_buffer_,
                                   pending_resolve_src_image_,
@@ -680,8 +724,70 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               }
               pending_resolve_dst_image_ = VK_NULL_HANDLE;
               pending_resolve_src_image_ = VK_NULL_HANDLE;
+              pending_resolve_drained_ = true;
             }
           }
+
+          if (present_texture) {
+            // Barrier the resolve texture to SHADER_READ_ONLY_OPTIMAL, then
+            // draw the fullscreen triangle sampling it. The drain above
+            // already left it in TRANSFER_DST_OPTIMAL; otherwise it is in
+            // SHADER_READ_ONLY_OPTIMAL from a previous frame's present
+            // (UNDEFINED only on the very first sample of a fresh texture).
+            VkImageMemoryBarrier tex_acquire = {};
+            tex_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            tex_acquire.srcAccessMask = pending_resolve_drained_
+                                            ? VK_ACCESS_TRANSFER_WRITE_BIT
+                                        : last_presented_texture_layout_ ==
+                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                            ? VK_ACCESS_SHADER_READ_BIT
+                                            : 0;
+            tex_acquire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            tex_acquire.oldLayout = pending_resolve_drained_
+                                        ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                                    : last_presented_texture_layout_;
+            tex_acquire.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            tex_acquire.image = present_texture->image;
+            tex_acquire.subresourceRange = subresource_range;
+            dfn.vkCmdPipelineBarrier(
+                present_command_buffer_,
+                pending_resolve_drained_ ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                : last_presented_texture_layout_ ==
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                    : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                nullptr, 1, &tex_acquire);
+            last_presented_texture_layout_ =
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            const bool rb_swap_needed = present_texture->needs_rb_swap;
+            VkImageView src_view = present_texture->view;
+            present_pass_.Draw(vulkan_device, present_command_buffer_, src_view,
+                               rb_swap_needed, width, height);
+          } else {
+            // No texture: clear to black. No fallback to the color test.
+            VkRenderingAttachmentInfo attachment_info = {};
+            attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            attachment_info.imageView = vulkan_context.image_view();
+            attachment_info.imageLayout =
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attachment_info.clearValue.color = {0.0f, 0.0f, 0.0f, 1.0f};
+
+            VkRenderingInfo rendering_info = {};
+            rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering_info.renderArea.offset = {0, 0};
+            rendering_info.renderArea.extent = {width, height};
+            rendering_info.layerCount = 1;
+            rendering_info.colorAttachmentCount = 1;
+            rendering_info.pColorAttachments = &attachment_info;
+            dfn.vkCmdBeginRendering(present_command_buffer_, &rendering_info);
+            dfn.vkCmdEndRendering(present_command_buffer_);
+          }
+
+          // The pending resolve drain now lives above the present block.
 
           // Stage 2.2 debug dump: on the configured frame, dump every resolve
           // texture and the presented guest output after the resolve drain.

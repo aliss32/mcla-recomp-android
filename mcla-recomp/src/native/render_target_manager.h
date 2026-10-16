@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <rex/ui/vulkan/api.h>
 #include <rex/ui/vulkan/device.h>
@@ -36,9 +37,14 @@ public:
   bool Initialize(const ui::vulkan::VulkanDevice *device);
   void Shutdown();
 
-  // Color format for a guest color RT format; VK_FORMAT_UNDEFINED if
-  // unmapped (logged once by the caller).
-  static VkFormat HostColorFormat(uint32_t guest_color_format);
+  // Host format for a guest color RT format (ColorRenderTargetFormat,
+  // xenos.h:298-318); VK_FORMAT_UNDEFINED if unmapped.
+  static VkFormat HostFormatFromRT(uint32_t guest_rt_format);
+  // Host format for a guest resolve destination format (ColorFormat,
+  // xenos.h:537-565); VK_FORMAT_UNDEFINED if unmapped. Separate tables: the
+  // two enum spaces share numbers with different meanings (RT k_8_8 = 0
+  // vs ColorFormat k_8_8_8_8 = 6).
+  static VkFormat HostFormatFromTextureFormat(uint32_t guest_color_format);
   // Depth format for a guest depth RT format; VK_FORMAT_UNDEFINED if
   // unmapped.
   VkFormat HostDepthFormat(uint32_t guest_depth_format) const;
@@ -86,6 +92,9 @@ public:
     uint32_t pitch = 0;
     uint32_t guest_format = 0;
     VkFormat host_format = VK_FORMAT_UNDEFINED;
+    // Layout the image was last left in (tracked so repeated barriers use the
+    // real previous layout instead of UNDEFINED, which discards contents).
+    VkImageLayout last_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool needs_rb_swap = false; // guest dest swap == 1
   };
 
@@ -107,12 +116,12 @@ public:
   // True once Initialize succeeded; ApplyCopy no-ops before it.
   bool initialized() const { return device_ != nullptr; }
 
-  // Cheap one-shot warning gate (32 messages per process), for the caller's
-  // throttled logging.
-  bool log_throttle() const { return logged_format_warnings_ < 32; }
-  void ConsumeLogSlot() { ++logged_format_warnings_; }
-
+  // Per-message-key throttled logging: each distinct key is logged (with the
+  // caller's formatted message) at most kMaxLogsPerKey times, and at most
+  // kMaxLogKeys distinct keys are ever tracked, so one repeating error can
+  // no longer consume the whole log budget.
   void LogOnce(const char *what);
+  void LogThrottledKey(const char *key, const std::string &message);
 
 private:
   const ui::vulkan::VulkanDevice *device_ = nullptr;
@@ -129,7 +138,14 @@ private:
 
   // D24_UNORM_S8_UINT availability, probed at Initialize.
   bool d24_unorm_s8_supported_ = false;
-  uint32_t logged_format_warnings_ = 0;
+
+  // Per-key log throttle state (linear arrays, same rationale as the RT
+  // pools: dozens of keys per run at most).
+  static constexpr uint32_t kMaxLogKeys = 32;
+  static constexpr uint32_t kMaxLogsPerKey = 3;
+  const char *log_keys_[kMaxLogKeys] = {};
+  uint32_t log_key_counts_[kMaxLogKeys] = {};
+  uint32_t log_key_count_ = 0;
 };
 
 } // namespace rex::graphics::mcla_native
