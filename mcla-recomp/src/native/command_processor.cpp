@@ -1,4 +1,4 @@
-// MCLA native renderer, stage 1: census command processor implementation.
+// MCLA native renderer: census command processor + stage 2.1 presenter test.
 // See command_processor.h.
 #include "command_processor.h"
 
