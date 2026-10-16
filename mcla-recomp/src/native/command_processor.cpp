@@ -72,12 +72,26 @@ bool MclaNativeCommandProcessor::SetupContext() {
     REXLOG_INFO("mcla_native: census recording to {}", census_path);
   }
   census_.BeginFrame();
+  // Stage 2.2: host RT/resolve texture manager (provider device). Without a
+  // provider (headless) it stays uninitialized and ApplyCopy no-ops.
+  if (graphics_system_->provider()) {
+    rt_manager_.Initialize(static_cast<const ui::vulkan::VulkanProvider *>(
+                               graphics_system_->provider())
+                               ->vulkan_device());
+  }
+  // Stage 2.2 debug dump frame number (host cvar, read by name cross-module).
+  dump_frame_number_ =
+      uint64_t(::rex::cvar::Query<int32_t>("mcla_native_dump_frame"));
+  dump_frame_enabled_ = dump_frame_number_ != 0;
   return true;
 }
 
 void MclaNativeCommandProcessor::ShutdownContext() {
   census_.EndFrame();
   DestroyPresentResources();
+  rt_manager_.Shutdown();
+  frame_dump_.Shutdown();
+  frame_dump_ready_ = false;
 }
 
 void MclaNativeCommandProcessor::InitializeShaderStorage(
@@ -221,7 +235,128 @@ bool MclaNativeCommandProcessor::IssueCopy() {
                                       uint32_t(copy_control.copy_command),
                                       uint32_t(copy_control.copy_src_select)));
   }
+
+  // Stage 2.2: apply the clears and the format-preserving resolves to host
+  // render targets. Conversion-required resolves are counted and skipped
+  // (logged), never silent. Census counters advance in parallel.
+  ++last_frame_resolves_;
+  ApplyCopy(last_frame_clears_, last_frame_applied_, last_frame_skipped_conv_);
   return true;
+}
+// Stage 2.2 clear/resolve application.
+//
+// draw_util::GetResolveInfo (include/rex/graphics/util/draw.h:584-587)
+// produces the full copy description from the live register state: source
+// EDRAM region (ResolveEdramInfo: base_tiles/pitch_tiles/msaa/format,
+// draw.h:341-358), clear values (rb_depth_clear/rb_color_clear/
+// rb_color_clear_lo, draw.h:511-513), the destination region
+// (copy_dest_base/pitch/height via copy_dest_coordinate_info, draw.h:387-403)
+// and the extent actually written (copy_dest_extent_start/length,
+// draw.h:507-508). We register every non-conversion resolve destination as a
+// host texture and issue vkCmdResolveImage (MSAA) or vkCmdCopyImage (1x) from
+// the matching RT.
+void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
+                                           uint32_t &skipped_conv) {
+  clears = 0;
+  applied = 0;
+  skipped_conv = 0;
+  if (!rt_manager_.initialized()) {
+    return;
+  }
+  draw_util::ResolveInfo info;
+  if (!draw_util::GetResolveInfo(*register_file_, *memory_, 1, 1, false, false,
+                                 info)) {
+    rt_manager_.LogOnce("resolve_info_invalid");
+    return;
+  }
+  if (!info.coordinate_info.width_div_8 || !info.height_div_8) {
+    return;
+  }
+
+  const uint32_t width_px = info.coordinate_info.width_div_8 * 8;
+  const uint32_t height_px = info.height_div_8 * 8;
+
+  // Clear accounting matches the census (depth clear, color clear, or both).
+  if (info.IsClearingDepth())
+    ++clears;
+  if (info.IsClearingColor())
+    ++clears;
+
+  if (info.copy_dest_extent_length == 0) {
+    return; // nothing to copy (clear-only packet)
+  }
+
+  const bool copying_depth = info.IsCopyingDepth();
+  const draw_util::ResolveEdramInfo &src_edram =
+      copying_depth ? info.depth_edram_info : info.color_edram_info;
+  const uint32_t src_base =
+      copying_depth ? info.depth_original_base : info.color_original_base;
+  const uint32_t src_format = src_edram.format;
+
+  reg::RB_COPY_DEST_INFO dest_info = info.copy_dest_info;
+  const uint32_t dest_format = uint32_t(dest_info.copy_dest_format);
+  const uint32_t swap_mode = uint32_t(dest_info.copy_dest_swap);
+  const uint32_t dest_pitch =
+      uint32_t(info.copy_dest_coordinate_info.pitch_aligned_div_32) * 32;
+
+  // Depth clears/copies target color formats in the census; the guest
+  // resolves depth to a color-format dest texture in those packets. For 2.2
+  // we only implement color->color resolves; depth source conversion is
+  // counted and skipped.
+  if (copying_depth) {
+    ++skipped_conv;
+    if (rt_manager_.log_throttle()) {
+      REXLOG_WARN("stage2.2: depth resolve skipped (src fmt {} dest fmt {})",
+                  src_format, dest_format);
+    }
+    return;
+  }
+
+  // Format-preserving resolve only (census: 8_8_8_8 -> 8_8_8_8 is the
+  // dominant case; 2_10_10_10_FLOAT -> 8_8_8_8 etc. need shader conversion).
+  // ColorFormat numbers: 6 = k_8_8_8_8 (xenos.h:548).
+  const bool same_format =
+      (src_format == dest_format) ||
+      (src_format == 0 &&
+       dest_format == 6); // RT k_8_8 == dest ColorFormat k_8_8
+  if (!same_format) {
+    ++skipped_conv;
+    if (rt_manager_.log_throttle()) {
+      REXLOG_WARN("stage2.2: conversion resolve skipped (src fmt {} dest fmt "
+                  "{} swap {})",
+                  src_format, dest_format, swap_mode);
+    }
+    return;
+  }
+
+  RenderTargetManager::RenderTarget *src_rt =
+      rt_manager_.FindRenderTarget(src_base);
+  if (!src_rt) {
+    // The RT is only known after draws have been applied to it (stage 2.3);
+    // without a source RT the resolve produces nothing yet. Logged once per
+    // base via the manager's throttle.
+    rt_manager_.LogOnce("resolve_without_source_rt");
+    return;
+  }
+
+  RenderTargetManager::ResolveTexture *dest_tex =
+      rt_manager_.GetOrCreateResolveTexture(info.copy_dest_base, dest_pitch,
+                                            height_px, dest_format, swap_mode);
+  if (!dest_tex) {
+    rt_manager_.LogOnce("resolve_dest_unavailable");
+    return;
+  }
+
+  // Queue the resolve into the present command buffer (single submission per
+  // swap). Layout: source RT TRANSFER_SRC_OPTIMAL, dest UNDEFINED ->
+  // TRANSFER_DST_OPTIMAL, barriered at drain time in IssueSwap.
+  pending_resolve_src_image_ = src_rt->image;
+  pending_resolve_dst_image_ = dest_tex->image;
+  pending_resolve_src_msaa_ = src_rt->msaa;
+  pending_resolve_width_ = width_px;
+  pending_resolve_height_ = height_px;
+  pending_resolve_src_is_depth_ = src_rt->is_depth;
+  ++applied;
 }
 
 // Stage 2.1 presenter test: a tiny standalone Vulkan submission path used
@@ -301,30 +436,30 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // compare it with the frame's last resolve "dest 0x..." key.
   census_.RecordSwap(frontbuffer_width, frontbuffer_height, frontbuffer_ptr);
 
-  // Stage 2.1 presenter test: present a solid color changing only every 30
-  // frames ((frame / 30) % 3 -> red/green/blue), so the presenter connection
-  // is verifiable on device without flashing per frame.
-  //
-  // RefreshGuestOutput contract (include/rex/ui/presenter.h:349-360): the
-  // callback is invoked synchronously (or from a backend thread) and must
-  // submit all GPU work and signal the required synchronization primitives
-  // before returning true; the image must be released in
-  // kGuestOutputInternalLayout = SHADER_READ_ONLY_OPTIMAL
-  // (ui/vulkan/presenter.h:71-83). The presenter then signals its own
-  // tracking fence after the callback returns
-  // (vulkan_presenter.cpp:1199-1209), which is how it knows the refresher's
-  // GPU work is ordered before any later use of the image.
+  // Stage 2.2: present the resolve texture that wrote the frame's frontbuffer
+  // (dest_base == swap_ptr, census-verified in stage 1) through a fullscreen
+  // sampling pass. A full pipeline (vertex + fragment SPIR-V) draws a triangle
+  // covering the render area sampling the registered texture; without a
+  // registered texture the frame presents black (logged, never a fallback to
+  // the stage 2.1 color test).
   const uint64_t frame = census_frame_count_;
-  const uint32_t color_index = uint32_t((frame / 30) % 3);
-  static constexpr float kColorTable[3][4] = {{1.0f, 0.0f, 0.0f, 1.0f},
-                                              {0.0f, 1.0f, 0.0f, 1.0f},
-                                              {0.0f, 0.0f, 1.0f, 1.0f}};
-  const float *color = kColorTable[color_index];
+  RenderTargetManager::ResolveTexture *present_texture =
+      rt_manager_.FindResolveTexture(frontbuffer_ptr);
+  if (!present_texture) {
+    last_swap_dest_base_ = frontbuffer_ptr;
+    if (++present_without_texture_count_ <= 3 ||
+        (present_without_texture_count_ % 600) == 0) {
+      REXLOG_WARN(
+          "stage2.2 frame {}: no resolve texture for swap_ptr 0x{:08X} - "
+          "presenting black (count {})",
+          frame, frontbuffer_ptr, uint64_t(present_without_texture_count_));
+    }
+  }
 
   ui::Presenter *presenter = graphics_system_->presenter();
   if (!presenter) {
     if (++present_fail_count_ <= 3 || (present_fail_count_ % 600) == 0) {
-      REXLOG_WARN("stage2.1 frame {}: no presenter (count {})", frame,
+      REXLOG_WARN("stage2.2 frame {}: no presenter (count {})", frame,
                   uint64_t(present_fail_count_));
     }
   } else {
@@ -336,8 +471,8 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         width, height,
         std::max(uint32_t(1), uint32_t(video_mode.display_width)),
         std::max(uint32_t(1), uint32_t(video_mode.display_height)),
-        [this, width, height,
-         color](ui::Presenter::GuestOutputRefreshContext &context) -> bool {
+        [this, width, height, present_texture](
+            ui::Presenter::GuestOutputRefreshContext &context) -> bool {
           auto &vulkan_context = static_cast<
               ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext &>(
               context);
@@ -356,8 +491,6 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               ui::vulkan::util::InitializeSubresourceRange();
 
           // Acquire the guest output image for a color attachment write.
-          // UNDEFINED old layout is safe in both states: the clear
-          // overwrites every pixel.
           VkImageMemoryBarrier acquire_barrier = {};
           acquire_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
           acquire_barrier.srcAccessMask =
@@ -369,24 +502,6 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           acquire_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
           acquire_barrier.image = vulkan_context.image();
           acquire_barrier.subresourceRange = subresource_range;
-
-          VkRenderingAttachmentInfo attachment_info = {};
-          attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-          attachment_info.imageView = vulkan_context.image_view();
-          attachment_info.imageLayout =
-              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-          attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-          attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-          attachment_info.clearValue.color = {color[0], color[1], color[2],
-                                              color[3]};
-
-          VkRenderingInfo rendering_info = {};
-          rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-          rendering_info.renderArea.offset = {0, 0};
-          rendering_info.renderArea.extent = {width, height};
-          rendering_info.layerCount = 1;
-          rendering_info.colorAttachmentCount = 1;
-          rendering_info.pColorAttachments = &attachment_info;
 
           // Release barrier back to the presenter's layout.
           VkImageMemoryBarrier release_barrier = {};
@@ -405,7 +520,7 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
           if (dfn.vkBeginCommandBuffer(present_command_buffer_, &begin_info) !=
               VK_SUCCESS) {
-            REXLOG_WARN("stage2.1: vkBeginCommandBuffer failed");
+            REXLOG_WARN("stage2.2: vkBeginCommandBuffer failed");
             return false;
           }
           dfn.vkCmdPipelineBarrier(
@@ -415,8 +530,153 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                   : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
               nullptr, 1, &acquire_barrier);
-          dfn.vkCmdBeginRendering(present_command_buffer_, &rendering_info);
-          dfn.vkCmdEndRendering(present_command_buffer_);
+
+          if (present_texture) {
+            // Barrier the resolve texture to SHADER_READ_ONLY_OPTIMAL, draw
+            // the fullscreen triangle sampling it, then leave it in that
+            // layout (it will be resolved into again next frame - a
+            // subsequent resolve barriers it back). For 2.2 the texture is
+            // sampled with its unswizzled content: guest swap mode 1 is R/B
+            // swap; the swap pass shader has an rb_swap specialization that
+            // flips r/b. A transform image view does the swizzle when the
+            // driver does not.
+            VkImageMemoryBarrier tex_acquire = {};
+            tex_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            tex_acquire.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            tex_acquire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            tex_acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            tex_acquire.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            tex_acquire.image = present_texture->image;
+            tex_acquire.subresourceRange = subresource_range;
+            dfn.vkCmdPipelineBarrier(present_command_buffer_,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                                     0, nullptr, 0, nullptr, 1, &tex_acquire);
+
+            const bool rb_swap_needed = present_texture->needs_rb_swap;
+            VkImageView src_view = present_texture->view;
+            present_pass_.Draw(vulkan_device, present_command_buffer_, src_view,
+                               rb_swap_needed, width, height);
+          } else {
+            // No texture: clear to black. No fallback to the color test.
+            VkRenderingAttachmentInfo attachment_info = {};
+            attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            attachment_info.imageView = vulkan_context.image_view();
+            attachment_info.imageLayout =
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attachment_info.clearValue.color = {0.0f, 0.0f, 0.0f, 1.0f};
+
+            VkRenderingInfo rendering_info = {};
+            rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering_info.renderArea.offset = {0, 0};
+            rendering_info.renderArea.extent = {width, height};
+            rendering_info.layerCount = 1;
+            rendering_info.colorAttachmentCount = 1;
+            rendering_info.pColorAttachments = &attachment_info;
+            dfn.vkCmdBeginRendering(present_command_buffer_, &rendering_info);
+            dfn.vkCmdEndRendering(present_command_buffer_);
+          }
+
+          // Drain the pending resolve into this submission, before the
+          // present sampling so the presented image carries THIS frame's
+          // resolved contents (census-verified contract: last resolve dest ==
+          // swap_ptr, and the swap samples exactly that texture).
+          if (pending_resolve_dst_image_ != VK_NULL_HANDLE) {
+            VkImageMemoryBarrier dst_acquire = {};
+            dst_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            dst_acquire.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            dst_acquire.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            dst_acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            dst_acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            dst_acquire.image = pending_resolve_dst_image_;
+            dst_acquire.subresourceRange = subresource_range;
+            VkImageMemoryBarrier src_acquire = {};
+            src_acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            src_acquire.srcAccessMask =
+                pending_resolve_src_is_depth_
+                    ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+                    : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            src_acquire.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            src_acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            src_acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            src_acquire.image = pending_resolve_src_image_;
+            src_acquire.subresourceRange.aspectMask =
+                pending_resolve_src_is_depth_ ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                              : VK_IMAGE_ASPECT_COLOR_BIT;
+            src_acquire.subresourceRange.levelCount = 1;
+            src_acquire.subresourceRange.layerCount = 1;
+            VkImageMemoryBarrier drain_barriers[2] = {dst_acquire, src_acquire};
+            dfn.vkCmdPipelineBarrier(
+                present_command_buffer_,
+                pending_resolve_src_is_depth_
+                    ? VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+                    : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
+                drain_barriers);
+
+            VkImageResolve resolve_region = {};
+            resolve_region.srcSubresource.aspectMask =
+                src_acquire.subresourceRange.aspectMask;
+            resolve_region.srcSubresource.layerCount = 1;
+            resolve_region.dstSubresource.aspectMask =
+                VK_IMAGE_ASPECT_COLOR_BIT;
+            resolve_region.dstSubresource.layerCount = 1;
+            resolve_region.extent = {pending_resolve_width_,
+                                     pending_resolve_height_, 1};
+            if (pending_resolve_src_msaa_ >= 2) {
+              dfn.vkCmdResolveImage(
+                  present_command_buffer_, pending_resolve_src_image_,
+                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  pending_resolve_dst_image_,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve_region);
+            } else {
+              VkImageCopy copy_region = {};
+              copy_region.srcSubresource = resolve_region.srcSubresource;
+              copy_region.dstSubresource = resolve_region.dstSubresource;
+              copy_region.extent = resolve_region.extent;
+              dfn.vkCmdCopyImage(
+                  present_command_buffer_, pending_resolve_src_image_,
+                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  pending_resolve_dst_image_,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+            }
+            pending_resolve_dst_image_ = VK_NULL_HANDLE;
+            pending_resolve_src_image_ = VK_NULL_HANDLE;
+          }
+
+          // Stage 2.2 debug dump: on the configured frame, dump every resolve
+          // texture and the presented guest output after the resolve drain.
+          if (dump_frame_enabled_ &&
+              census_frame_count_ == dump_frame_number_) {
+            if (!frame_dump_ready_) {
+              frame_dump_ready_ = frame_dump_.Initialize(
+                  vulkan_device, present_command_pool_, present_fence_);
+            }
+            if (frame_dump_ready_) {
+              const std::filesystem::path dump_dir =
+                  rex::filesystem::GetUserFolder() / "MclaRecomp" / "dumps";
+              std::error_code ec;
+              std::filesystem::create_directories(dump_dir, ec);
+              for (uint32_t i = 0; i < rt_manager_.resolve_texture_count();
+                   ++i) {
+                const auto *tex = rt_manager_.resolve_texture(i);
+                frame_dump_.DumpImage(
+                    present_command_buffer_, tex->image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, tex->host_format,
+                    tex->width, tex->height, dump_dir,
+                    fmt::format("{:02}_dest_0x{:08X}_{}", i, tex->dest_base,
+                                uint32_t(tex->host_format)));
+              }
+              frame_dump_.DumpImage(
+                  present_command_buffer_, vulkan_context.image(),
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  ui::vulkan::VulkanPresenter::kGuestOutputFormat, width,
+                  height, dump_dir, "99_presented");
+            }
+          }
+
           dfn.vkCmdPipelineBarrier(
               present_command_buffer_,
               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -425,7 +685,7 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           dfn.vkEndCommandBuffer(present_command_buffer_);
 
           if (dfn.vkResetFences(device, 1, &present_fence_) != VK_SUCCESS) {
-            REXLOG_WARN("stage2.1: vkResetFences failed");
+            REXLOG_WARN("stage2.2: vkResetFences failed");
             return false;
           }
           VkSubmitInfo submit_info = {};
@@ -438,15 +698,15 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                     vulkan_device->queue_family_graphics_compute(), 0);
             if (dfn.vkQueueSubmit(queue_acq.queue(), 1, &submit_info,
                                   present_fence_) != VK_SUCCESS) {
-              REXLOG_WARN("stage2.1: vkQueueSubmit failed");
+              REXLOG_WARN("stage2.2: vkQueueSubmit failed");
               return false;
             }
           }
-          // 2.1 simplicity: wait for the fence so the presenter can never
-          // see the image in a partial state; revisit in 2.2.
+          // 2.2 simplicity: keep waiting on the fence (measured under 30 fps
+          // this does not bound the pipeline; revisit if frame time grows).
           if (dfn.vkWaitForFences(device, 1, &present_fence_, VK_TRUE,
                                   UINT64_MAX) != VK_SUCCESS) {
-            REXLOG_WARN("stage2.1: vkWaitForFences failed");
+            REXLOG_WARN("stage2.2: vkWaitForFences failed");
             return false;
           }
           return true;
@@ -454,16 +714,30 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     if (!refreshed) {
       ++present_fail_count_;
       if (present_fail_count_ <= 3 || (present_fail_count_ % 600) == 0) {
-        REXLOG_WARN("stage2.1 frame {}: RefreshGuestOutput failed (count {})",
+        REXLOG_WARN("stage2.2 frame {}: RefreshGuestOutput failed (count {})",
                     frame, uint64_t(present_fail_count_));
       }
+    }
+    // Dump PNG writes happen after the fence wait inside the callback.
+    if (frame_dump_ready_ && dump_frame_enabled_ &&
+        census_frame_count_ == dump_frame_number_) {
+      frame_dump_.Flush(rex::filesystem::GetUserFolder() / "MclaRecomp" /
+                        "dumps");
     }
   }
 
   if (frame <= 10 || (frame % 60) == 0) {
-    REXLOG_INFO("stage2.1 frame {} color=({},{},{},{})", frame, color[0],
-                color[1], color[2], color[3]);
+    REXLOG_INFO("stage2.2 frame {} resolves={} applied={} skipped_conv={} "
+                "clears={} swap_key=0x{:08X}",
+                frame, last_frame_resolves_, last_frame_applied_,
+                last_frame_skipped_conv_, last_frame_clears_,
+                last_swap_dest_base_);
   }
+  // Reset the per-frame copy counters for the next frame.
+  last_frame_resolves_ = 0;
+  last_frame_applied_ = 0;
+  last_frame_skipped_conv_ = 0;
+  last_frame_clears_ = 0;
   census_.EndFrame();
   census_.BeginFrame();
   ++census_frame_count_;
