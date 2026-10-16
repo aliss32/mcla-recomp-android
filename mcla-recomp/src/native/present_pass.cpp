@@ -13,7 +13,7 @@
 
 // VulkanDevice::Functions shorthand for the member definitions below; the
 // device type is ui::vulkan::VulkanDevice (via present_pass.h -> device.h).
-using VulkanDevice = ui::vulkan::VulkanDevice;
+using VulkanDevice = rex::ui::vulkan::VulkanDevice;
 
 namespace rex::graphics::mcla_native {
 
