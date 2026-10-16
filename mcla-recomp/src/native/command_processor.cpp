@@ -6,7 +6,13 @@
 #include <xxhash.h>
 
 #include <rex/cvar.h>
+#include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
+#include <rex/system/xvideo.h>
+#include <rex/ui/presenter.h>
+#include <rex/ui/vulkan/presenter.h>
+#include <rex/ui/vulkan/provider.h>
+#include <rex/ui/vulkan/util.h>
 
 #include "graphics_system.h"
 
@@ -69,7 +75,10 @@ bool MclaNativeCommandProcessor::SetupContext() {
   return true;
 }
 
-void MclaNativeCommandProcessor::ShutdownContext() { census_.EndFrame(); }
+void MclaNativeCommandProcessor::ShutdownContext() {
+  census_.EndFrame();
+  DestroyPresentResources();
+}
 
 void MclaNativeCommandProcessor::InitializeShaderStorage(
     const std::filesystem::path &cache_root, uint32_t title_id, bool blocking) {
@@ -215,14 +224,249 @@ bool MclaNativeCommandProcessor::IssueCopy() {
   return true;
 }
 
+// Stage 2.1 presenter test: a tiny standalone Vulkan submission path used
+// only from IssueSwap's RefreshGuestOutput callback.
+//
+// Queue access (a): the SDK externalizes queue access with a per-queue
+// recursive mutex - VulkanDevice::Queue (include/rex/ui/vulkan/device.h:
+// 244-263) and AcquireQueue (device.h:277-280) return a Queue::Acquisition
+// that holds the lock for the duration. The Xenos plugin
+// (vulkan/command_processor.cpp:5451-5458) and the presenter
+// (vulkan_presenter.cpp:1203-1205) both submit through
+// vulkan_device->AcquireQueue(queue_family_graphics_compute(), 0); the same
+// mechanism is used here - no raw vkQueueSubmit without the acquisition.
+bool MclaNativeCommandProcessor::EnsurePresentResources() {
+  if (present_resources_ready_) {
+    return true;
+  }
+  const ui::vulkan::VulkanDevice *const vulkan_device =
+      static_cast<const ui::vulkan::VulkanProvider *>(
+          graphics_system_->provider())
+          ->vulkan_device();
+  const ui::vulkan::VulkanDevice::Functions &dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  VkCommandPoolCreateInfo pool_info = {};
+  pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  pool_info.queueFamilyIndex = vulkan_device->queue_family_graphics_compute();
+  if (dfn.vkCreateCommandPool(device, &pool_info, nullptr,
+                              &present_command_pool_) != VK_SUCCESS) {
+    REXLOG_WARN("stage2.1: failed to create the command pool");
+    return false;
+  }
+  VkCommandBufferAllocateInfo alloc_info = {};
+  alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  alloc_info.commandPool = present_command_pool_;
+  alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  alloc_info.commandBufferCount = 1;
+  if (dfn.vkAllocateCommandBuffers(device, &alloc_info,
+                                   &present_command_buffer_) != VK_SUCCESS) {
+    REXLOG_WARN("stage2.1: failed to allocate the command buffer");
+    return false;
+  }
+  VkFenceCreateInfo fence_info = {};
+  fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  if (dfn.vkCreateFence(device, &fence_info, nullptr, &present_fence_) !=
+      VK_SUCCESS) {
+    REXLOG_WARN("stage2.1: failed to create the fence");
+    return false;
+  }
+  present_resources_ready_ = true;
+  return true;
+}
+
+void MclaNativeCommandProcessor::DestroyPresentResources() {
+  if (!present_resources_ready_) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice *const vulkan_device =
+      static_cast<const ui::vulkan::VulkanProvider *>(
+          graphics_system_->provider())
+          ->vulkan_device();
+  const ui::vulkan::VulkanDevice::Functions &dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  dfn.vkDestroyFence(device, present_fence_, nullptr);
+  dfn.vkDestroyCommandPool(device, present_command_pool_, nullptr);
+  present_fence_ = VK_NULL_HANDLE;
+  present_command_buffer_ = VK_NULL_HANDLE;
+  present_command_pool_ = VK_NULL_HANDLE;
+  present_resources_ready_ = false;
+}
+
 void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                            uint32_t frontbuffer_width,
                                            uint32_t frontbuffer_height) {
   // The frontbuffer address is the core datum of the wrong-region analysis:
   // compare it with the frame's last resolve "dest 0x..." key.
   census_.RecordSwap(frontbuffer_width, frontbuffer_height, frontbuffer_ptr);
+
+  // Stage 2.1 presenter test: present a solid color changing only every 30
+  // frames ((frame / 30) % 3 -> red/green/blue), so the presenter connection
+  // is verifiable on device without flashing per frame.
+  //
+  // RefreshGuestOutput contract (include/rex/ui/presenter.h:349-360): the
+  // callback is invoked synchronously (or from a backend thread) and must
+  // submit all GPU work and signal the required synchronization primitives
+  // before returning true; the image must be released in
+  // kGuestOutputInternalLayout = SHADER_READ_ONLY_OPTIMAL
+  // (ui/vulkan/presenter.h:71-83). The presenter then signals its own
+  // tracking fence after the callback returns
+  // (vulkan_presenter.cpp:1199-1209), which is how it knows the refresher's
+  // GPU work is ordered before any later use of the image.
+  const uint64_t frame = census_frame_count_;
+  const uint32_t color_index = uint32_t((frame / 30) % 3);
+  static constexpr float kColorTable[3][4] = {{1.0f, 0.0f, 0.0f, 1.0f},
+                                              {0.0f, 1.0f, 0.0f, 1.0f},
+                                              {0.0f, 0.0f, 1.0f, 1.0f}};
+  const float *color = kColorTable[color_index];
+
+  ui::Presenter *presenter = graphics_system_->presenter();
+  if (!presenter) {
+    if (++present_fail_count_ <= 3 || (present_fail_count_ % 600) == 0) {
+      REXLOG_WARN("stage2.1 frame {}: no presenter (count {})", frame,
+                  uint64_t(present_fail_count_));
+    }
+  } else {
+    const uint32_t width = frontbuffer_width ? frontbuffer_width : 1280;
+    const uint32_t height = frontbuffer_height ? frontbuffer_height : 720;
+    system::X_VIDEO_MODE video_mode;
+    kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
+    const bool refreshed = presenter->RefreshGuestOutput(
+        width, height,
+        std::max(uint32_t(1), uint32_t(video_mode.display_width)),
+        std::max(uint32_t(1), uint32_t(video_mode.display_height)),
+        [this, width, height,
+         color](ui::Presenter::GuestOutputRefreshContext &context) -> bool {
+          auto &vulkan_context = static_cast<
+              ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext &>(
+              context);
+          const ui::vulkan::VulkanDevice *const vulkan_device =
+              static_cast<const ui::vulkan::VulkanProvider *>(
+                  graphics_system_->provider())
+                  ->vulkan_device();
+          const ui::vulkan::VulkanDevice::Functions &dfn =
+              vulkan_device->functions();
+          const VkDevice device = vulkan_device->device();
+
+          if (!EnsurePresentResources()) {
+            return false;
+          }
+          VkImageSubresourceRange subresource_range =
+              ui::vulkan::util::InitializeSubresourceRange();
+
+          // Acquire the guest output image for a color attachment write.
+          // UNDEFINED old layout is safe in both states: the clear
+          // overwrites every pixel.
+          VkImageMemoryBarrier acquire_barrier = {};
+          acquire_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+          acquire_barrier.srcAccessMask =
+              vulkan_context.image_ever_written_previously()
+                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask
+                  : 0;
+          acquire_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          acquire_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+          acquire_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          acquire_barrier.image = vulkan_context.image();
+          acquire_barrier.subresourceRange = subresource_range;
+
+          VkRenderingAttachmentInfo attachment_info = {};
+          attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+          attachment_info.imageView = vulkan_context.image_view();
+          attachment_info.imageLayout =
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+          attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+          attachment_info.clearValue.color = {color[0], color[1], color[2],
+                                              color[3]};
+
+          VkRenderingInfo rendering_info = {};
+          rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+          rendering_info.renderArea.offset = {0, 0};
+          rendering_info.renderArea.extent = {width, height};
+          rendering_info.layerCount = 1;
+          rendering_info.colorAttachmentCount = 1;
+          rendering_info.pColorAttachments = &attachment_info;
+
+          // Release barrier back to the presenter's layout.
+          VkImageMemoryBarrier release_barrier = {};
+          release_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+          release_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          release_barrier.dstAccessMask =
+              ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask;
+          release_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          release_barrier.newLayout =
+              ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout;
+          release_barrier.image = vulkan_context.image();
+          release_barrier.subresourceRange = subresource_range;
+
+          VkCommandBufferBeginInfo begin_info = {};
+          begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+          begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+          if (dfn.vkBeginCommandBuffer(present_command_buffer_, &begin_info) !=
+              VK_SUCCESS) {
+            REXLOG_WARN("stage2.1: vkBeginCommandBuffer failed");
+            return false;
+          }
+          dfn.vkCmdPipelineBarrier(
+              present_command_buffer_,
+              vulkan_context.image_ever_written_previously()
+                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask
+                  : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
+              nullptr, 1, &acquire_barrier);
+          dfn.vkCmdBeginRendering(present_command_buffer_, &rendering_info);
+          dfn.vkCmdEndRendering(present_command_buffer_);
+          dfn.vkCmdPipelineBarrier(
+              present_command_buffer_,
+              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+              ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask, 0, 0,
+              nullptr, 0, nullptr, 1, &release_barrier);
+          dfn.vkEndCommandBuffer(present_command_buffer_);
+
+          if (dfn.vkResetFences(device, 1, &present_fence_) != VK_SUCCESS) {
+            REXLOG_WARN("stage2.1: vkResetFences failed");
+            return false;
+          }
+          VkSubmitInfo submit_info = {};
+          submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+          submit_info.commandBufferCount = 1;
+          submit_info.pCommandBuffers = &present_command_buffer_;
+          {
+            const ui::vulkan::VulkanDevice::Queue::Acquisition queue_acq =
+                vulkan_device->AcquireQueue(
+                    vulkan_device->queue_family_graphics_compute(), 0);
+            if (dfn.vkQueueSubmit(queue_acq.queue(), 1, &submit_info,
+                                  present_fence_) != VK_SUCCESS) {
+              REXLOG_WARN("stage2.1: vkQueueSubmit failed");
+              return false;
+            }
+          }
+          // 2.1 simplicity: wait for the fence so the presenter can never
+          // see the image in a partial state; revisit in 2.2.
+          if (dfn.vkWaitForFences(device, 1, &present_fence_, VK_TRUE,
+                                  UINT64_MAX) != VK_SUCCESS) {
+            REXLOG_WARN("stage2.1: vkWaitForFences failed");
+            return false;
+          }
+          return true;
+        });
+    if (!refreshed) {
+      ++present_fail_count_;
+      if (present_fail_count_ <= 3 || (present_fail_count_ % 600) == 0) {
+        REXLOG_WARN("stage2.1 frame {}: RefreshGuestOutput failed (count {})",
+                    frame, uint64_t(present_fail_count_));
+      }
+    }
+  }
+
+  if (frame <= 10 || (frame % 60) == 0) {
+    REXLOG_INFO("stage2.1 frame {} color=({},{},{},{})", frame, color[0],
+                color[1], color[2], color[3]);
+  }
   census_.EndFrame();
   census_.BeginFrame();
+  ++census_frame_count_;
   // The shader pair is deliberately NOT reset: the guest only re-uploads
   // its microcode when it changes, so a second frame may reuse the pair
   // loaded in the first without a new LoadShader call. A reset here would
