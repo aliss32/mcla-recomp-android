@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -92,6 +93,22 @@ private:
   uint32_t pending_resolve_height_ = 0;
   bool pending_resolve_src_is_depth_ = false;
 
+  // Stage 2.2b debug fill: when the resolve source RT was just created (no
+  // real draw has ever written it), the drain clears it to a fixed color
+  // (red for 0x07C48000, blue for 0x08378000, green otherwise) before the
+  // resolve, so the resolve -> present chain is visibly proven.
+  bool pending_resolve_debug_clear_ = false;
+  std::array<float, 4> pending_resolve_debug_color_ = {0.0f, 0.0f, 0.0f, 1.0f};
+  // Set when the drain actually ran in the current swap submission; the
+  // present sampling barrier then transitions the texture from
+  // TRANSFER_DST_OPTIMAL instead of a stale layout.
+  bool pending_resolve_drained_ = false;
+  // Layout the last presented resolve texture was left in
+  // (SHADER_READ_ONLY_OPTIMAL after a sampled present, UNDEFINED before the
+  // first present) - the real previous layout for the next drain's dst
+  // barrier, instead of an UNDEFINED that would discard the drained frame.
+  VkImageLayout last_presented_texture_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+
   // vkCmdResolveImage/vkCmdCopyImage are absent from the SDK's
   // VulkanDevice::Functions (device_1_0.inc); fetched once via
   // vkGetDeviceProcAddr at first use.
@@ -116,6 +133,8 @@ private:
   uint32_t last_frame_skipped_conv_ = 0;
   uint32_t last_frame_clears_ = 0;
   bool frame_copies_started_ = false;
+  // Per-frame resolve detail log budget (first 10 + every 60th frame).
+  uint32_t frame_resolve_logs_ = 0;
 
   // Own frame counter for the color cadence and log throttling (the census
   // keeps its own bookkeeping; this counts presented swaps).
