@@ -30,15 +30,13 @@ constexpr uint64_t kPresentFenceTimeoutNs = 2'000'000'000ull;
 // Stage 1.7: the stage-2.2 debug fill is diagnostic-only (a flat red/blue/
 // green frame proves the resolve->present chain). Once real draws (stage
 // 2.3) run, it must be off or it would overwrite every rendered frame.
-REXCVAR_DEFINE_BOOL(mcla_debug_clear, false, "MCLA",
-                    "Fill resolve-sourced frames with a flat debug colour "
-                    "instead of resolving guest content (stage 2.2 chain "
-                    "proof; turn OFF once real draws run)");
+REXCVAR_DEFINE_BOOL(mcla_debug_clear, true, "MCLA",
+                    "Draw debug flat colour instead of real output");
 
 bool DebugClearEnabled() {
-  bool value = false;
-  REXCVAR_QUERY(mcla_debug_clear, &value);
-  return value;
+  // The cvar is defined in this TU, so read it directly via REXCVAR_GET
+  // (REXCVAR_QUERY takes (type, name), not (name, out-pointer)).
+  return REXCVAR_GET(mcla_debug_clear);
 }
 } // namespace
 
