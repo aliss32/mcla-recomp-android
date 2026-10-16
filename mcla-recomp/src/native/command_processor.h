@@ -18,14 +18,20 @@
 
 #include "frame_census.h"
 
+// Vulkan types for the present-test submission come from the SDK's
+// rex/ui/vulkan/api.h chain (it defines VK_NO_PROTOTYPES and
+// VK_ENABLE_BETA_EXTENSIONS BEFORE including <vulkan/vulkan.h>, and
+// vulkan.h:94 gates vulkan_beta.h on that macro). Included first, before
+// any other Vulkan-touching header, so every later definition sees the
+// same consistent set.
+#include <rex/ui/vulkan/api.h>
+
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
 #include <rex/system/kernel_state.h>
 #include <rex/types.h>
-
-#include <vulkan/vulkan.h>
 
 // (clangd diagnostics in the IDE are expected: it has no SDK include path;
 // the CMake build compiles this cleanly)
