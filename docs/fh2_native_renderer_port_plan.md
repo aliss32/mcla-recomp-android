@@ -67,3 +67,46 @@ Adapt the FH2-recompiled graphics stack to MCLA and ship it as an APK on a new b
   (2008, same XDK generation) suggests the same format — verify in Faz 3.
 - Descriptor indexing requirement (`VK_EXT_descriptor_indexing`) blocked FH2 native on some
   Adreno drivers; our Turnip proxy path may already solve this.
+
+## Faz 1 inventory (measured, 2026-10-16)
+
+- `app/src/nativo/`: 31 files (10 cpp, 21 h), ~1.8 MB. Game-specific code is guarded by
+  `FH2_RECOMP` / `NFSC_RECOMP` / default(NFSMW); full guarded-line list exported to
+  `docs/fh2_recomp_inventory.csv` (206 preprocessor branch lines). The heavy renderer files
+  (`nfsmw_nativo_dibujos.cpp` 827 KB, `nfsmw_nativo_destinos.cpp` 429 KB,
+  `nfsmw_nativo_sistema.cpp` 269 KB) are mostly game-agnostic PM4/Vulkan code.
+- FH2-only game hooks live in `app/src/fh2_nativo_ganchos.cpp` (63 lines: hooks on
+  `sub_82B70280` CreatePixelShader, `sub_82B70468` CreateVertexShader, `sub_8241ACA0` VS
+  fetch patcher, `sub_8245B370` SetVertexShader) and `app/src/fh2_nativo_enlaces.cpp`
+  (neutral answers to NFSMW-specific renderer questions). These map to our
+  `mcla-recomp/src` side (like our `mcla-native` plugin) rather than `src/nativo`.
+- Device offsets the FH2 branch fills (`nfsmw_nativo_ganchos.cpp:53-63`): device VS 0x3310,
+  device PS 0x330C; NFS Carbon 0x3080/0x307C; NFSMW default 0x4FE8/0x4FE4. MCLA needs its own
+  values found in our recompiled code (Faz 5).
+- `REXCVAR_` cvars in nativo/: 212 across 10 files, none named `fh2_*` (the FH2-specific
+  cvars live in the FH2 host code, e.g. `fh2_renderizador`, `fh2_censo`).
+- FH2 builds nativo into the main executable (`app/CMakeLists.txt:27-37`) with
+  `FH2_RECOMP=1` + SDK xxHash + presenter SPIR-V includes; our tree builds GPU plugins as
+  separate `.so` targets (`mcla-recomp/CMakeLists.txt:73`, plugin id `mcla-native`). The
+  FH2-derived renderer becomes a second plugin target `rexgpu-mcla-fhnative`
+  (libmcla-fhnative.so) next to `rexgpu-mcla-native`.
+- Translator: FH2 changes live under `FH2_RECOMP` in `tools/xenos/recomp/shader_recompiler.{h,cpp}`
+  (36 branch sites) + `shader_common.h`; built by `tools/xenos/biblioteca.sh` with
+  `-DNFSMW_RECOMP -DFH2_RECOMP`, fmt+xxHash from `sdk/thirdparty`, DXC for SPIR-V.
+
+## Faz 2/3 status update (2026-10-16, later)
+
+- XenosRecomp translator tree fully surveyed: `tools/xenos/recomp/XenosRecomp/shader_recompiler.cpp`
+  (2441 lines; FH2_RECOMP branch sites at 342, 679, 884, 1352, 1384-1404, 1470, 1520, 1616, 1686,
+  1737, 1783, 1871, 1884, 1908, 2078, 2172, 2389), `shader_common.h` (FH2_* byte-layout macros),
+  `nfsmw_hlsl.cpp` (host-side main()), `empaquetar.cpp` (.nfsp packer keyed on FH2_RECOMP).
+- MCLA game data reality check: the PC reference tree `C:\Users\aliha\Desktop\mcla-recomp-v1.0.1`
+  ships `game/` with loose `default.xex` + `xarchive_{cache,audio,audlo,music}.rpf`. Raw byte scans
+  find only ~34 scattered 0x102A container magics — the shader blocks live inside RPF entries that
+  are compressed/encrypted, so a plain byte scan cannot lift them. Build the extraction on the
+  emulator's own archive reader instead (MCLA xex embeds the XArchive reader; FH2's
+  `extrair_contenedores.py` walks the LZX-compressed zips the same way).
+- Only `xarchive_cache.rpf` matters for shaders (media/shaders-equivalent); audio archives hit the
+  same magics inside compressed audio blobs (false positives).
+- Deliverable for Faz 3 becomes `mcla_shaders.nfsp` + `contenedores/` directory, built by a new
+  `tools/xenos_mcla/` build script mirroring `biblioteca.sh` but reading MCLA archives.
