@@ -653,17 +653,30 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             }
             if (pending_resolve_dst_image_ != VK_NULL_HANDLE) {
               if (pending_resolve_src_msaa_ >= 2) {
-                transfer_resolve_(command_buffer, pending_resolve_src_image_,
+                transfer_resolve_(present_command_buffer_,
+                                  pending_resolve_src_image_,
                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                   pending_resolve_dst_image_,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                                   &resolve_region);
               } else {
-                transfer_copy_image_(command_buffer, pending_resolve_src_image_,
-                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                     pending_resolve_dst_image_,
-                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                                     &copy_region);
+                // Non-MSAA source: plain copy. Same region shape as the
+                // resolve, with the copy's own VkImageCopy type (color dest,
+                // aspect matched to the source as above).
+                VkImageCopy copy_region = {};
+                copy_region.srcSubresource.aspectMask =
+                    src_acquire.subresourceRange.aspectMask;
+                copy_region.srcSubresource.layerCount = 1;
+                copy_region.dstSubresource.aspectMask =
+                    VK_IMAGE_ASPECT_COLOR_BIT;
+                copy_region.dstSubresource.layerCount = 1;
+                copy_region.extent = {pending_resolve_width_,
+                                      pending_resolve_height_, 1};
+                transfer_copy_image_(
+                    present_command_buffer_, pending_resolve_src_image_,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    pending_resolve_dst_image_,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
               }
               pending_resolve_dst_image_ = VK_NULL_HANDLE;
               pending_resolve_src_image_ = VK_NULL_HANDLE;
