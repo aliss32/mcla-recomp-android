@@ -25,6 +25,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/types.h>
 
+#include <vulkan/vulkan.h>
+
 // (clangd diagnostics in the IDE are expected: it has no SDK include path;
 // the CMake build compiles this cleanly)
 namespace rex::graphics::mcla_native {
@@ -63,6 +65,28 @@ protected:
                  uint32_t frontbuffer_height) override;
 
 private:
+  // Stage 2.1 presenter test: a tiny standalone Vulkan submission path, used
+  // only from IssueSwap's RefreshGuestOutput callback. The guest-output image
+  // has no TRANSFER_DST usage (vulkan_presenter.cpp:1596-1597), so the solid
+  // color is written with vkCmdBeginRendering loadOp=CLEAR, and the queue is
+  // taken through the SDK's mutex-serialized VulkanDevice::AcquireQueue (the
+  // same external-synchronization mechanism the Xenos plugin and the
+  // presenter use - device.h:244-280). The fence is waited on before the
+  // callback returns (presenter.h:355-357 requires all GPU work and required
+  // signaling to be done on successful return).
+  bool EnsurePresentResources();
+  void DestroyPresentResources();
+
+  VkCommandPool present_command_pool_ = VK_NULL_HANDLE;
+  VkCommandBuffer present_command_buffer_ = VK_NULL_HANDLE;
+  VkFence present_fence_ = VK_NULL_HANDLE;
+  bool present_resources_ready_ = false;
+  uint64_t present_fail_count_ = 0;
+
+  // Own frame counter for the color cadence and log throttling (the census
+  // keeps its own bookkeeping; this counts presented swaps).
+  uint64_t census_frame_count_ = 0;
+
   // Microcode hashes of the current pair, updated by LoadShader. The base
   // class owns the Shader objects; the census only needs their identities.
   // Deliberately NOT reset at the swap boundary: the guest re-uploads its
