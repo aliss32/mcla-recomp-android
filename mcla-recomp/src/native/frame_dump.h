@@ -12,6 +12,7 @@
 
 #include <rex/ui/vulkan/api.h>
 #include <rex/ui/vulkan/device.h>
+#include <rex/ui/vulkan/util.h>
 
 #include <vulkan/vulkan.h>
 
