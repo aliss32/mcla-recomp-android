@@ -128,3 +128,24 @@ Adapt the FH2-recompiled graphics stack to MCLA and ship it as an APK on a new b
   with `MCLA_RECOMP` instead of `FH2_RECOMP`) produces `mcla_shaders.nfsp`.
 - This changes Faz 3b/4/5 order: the dump plugin is Faz 4's first commit, then shader build, then
   the full native renderer.
+
+## Faz 4a completion (2026-10-16)
+
+Delivered in this commit:
+- `mcla-recomp/src/dump/` — `rexgpu-mcla-dump` plugin skeleton (5 files): same census
+  plumbing (Vulkan provider + blank present) plus a `ContainerDumper` background thread that
+  walks guest physical memory every 5 s and writes every valid 0x102A shader container
+  (2005/2008 formats, deduped by XXH3) to `<content>/contenedores/*.bin`.
+- `mcla-recomp/CMakeLists.txt` — `rexgpu-mcla-dump` shared library target mirroring
+  `rexgpu-mcla-native` (census sources + dump sources).
+- `scripts/build_native.sh` — builds the new target; .so files auto-stage to jniLibs.
+- `app/src/main/java/com/mcla/LauncherActivity.java` — "Renderer" button + dialog
+  (Xenos emulated / MCLA native / FH2 native), persisted in PERF_PREFERENCES as
+  `renderer`, summary label under the button; choice forwarded as `mcla_renderer` extra.
+- `app/src/main/java/com/mcla/MclaActivity.java` — `mcla_renderer` extra replaces any
+  `--gpu_plugin` line in the effective args (`--gpu_plugin=<choice>`).
+- `mcla-recomp/src/mcla_app.cpp` — census-path check widened to `mcla-native || mcla-dump`.
+
+Open items for the next phases (unchanged from the plan): nativo code carry-over with
+`MCLA_RECOMP` guards (Faz 4b), MCLA address table for the four shader hooks (Faz 5),
+shaders from the dumped containers via XenosRecomp+empaquetar (Faz 7), APK (Faz 8).
