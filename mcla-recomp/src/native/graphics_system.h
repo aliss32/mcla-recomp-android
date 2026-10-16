@@ -1,23 +1,22 @@
-// MCLA native renderer graphics system, stage 2.1.
+// MCLA native renderer graphics system, stage 1.
 //
-// Stage 2.1 inherits the SDK's Vulkan provider and presenter wiring: the
+// Owns the census command processor and the host Vulkan presenter. The
 // presenter path is the SDK's Vulkan provider (the same one the Xenos plugin
-// uses), so IssueSwap's RefreshGuestOutput callback can write the presenter's
-// guest-output image the same way the Xenos plugin does. The guest's D3D
-// protocol (swap packets, gamma ramps, interrupts) is served by the base
-// GraphicsSystem identically to the Xenos plugin's.
+// uses), so what appears on screen while the census runs is the presenter's
+// blank guest-output surface; the guest's D3D protocol (swap packets, gamma
+// ramps, interrupts) is served identically to the Xenos plugin's.
 #pragma once
 
 #include <memory>
 #include <string>
 
-#include <rex/graphics/vulkan/graphics_system.h>
+#include <rex/graphics/graphics_system.h>
 
 namespace rex::graphics::mcla_native {
 
 class MclaNativeCommandProcessor;
 
-class MclaNativeGraphicsSystem : public vulkan::VulkanGraphicsSystem {
+class MclaNativeGraphicsSystem : public GraphicsSystem {
 public:
   MclaNativeGraphicsSystem();
   ~MclaNativeGraphicsSystem() override;
@@ -25,6 +24,9 @@ public:
   static bool IsAvailable() { return true; }
 
   std::string name() const override;
+
+protected:
+  void CreateProvider(bool with_presentation) override;
 
 private:
   std::unique_ptr<CommandProcessor> CreateCommandProcessor() override;

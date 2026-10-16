@@ -2,17 +2,11 @@
 // See command_processor.h.
 #include "command_processor.h"
 
-#include <array>
-#include <cmath>
 #include <fmt/format.h>
 #include <xxhash.h>
 
 #include <rex/cvar.h>
-#include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
-#include <rex/system/xvideo.h>
-#include <rex/ui/vulkan/presenter.h>
-#include <rex/ui/vulkan/util.h>
 
 #include "graphics_system.h"
 
@@ -48,18 +42,13 @@ uint32_t UnpackColorBase(uint32_t value) {
 } // namespace
 
 MclaNativeCommandProcessor::MclaNativeCommandProcessor(
-    vulkan::VulkanGraphicsSystem *graphics_system,
+    MclaNativeGraphicsSystem *graphics_system,
     system::KernelState *kernel_state)
-    : vulkan::VulkanCommandProcessor(graphics_system, kernel_state) {}
+    : CommandProcessor(graphics_system, kernel_state) {}
 
 MclaNativeCommandProcessor::~MclaNativeCommandProcessor() = default;
 
 bool MclaNativeCommandProcessor::SetupContext() {
-  // The SDK's Vulkan setup (shared memory, caches, submission machinery) is
-  // inherited first.
-  if (!vulkan::VulkanCommandProcessor::SetupContext()) {
-    return false;
-  }
   // The host sets --mcla_native_census (default under the log dir) when the
   // plugin is selected; enable the census once here so the first frame is
   // also opened and recorded. An empty path leaves the census off - that is
@@ -84,22 +73,19 @@ void MclaNativeCommandProcessor::ShutdownContext() { census_.EndFrame(); }
 
 void MclaNativeCommandProcessor::InitializeShaderStorage(
     const std::filesystem::path &cache_root, uint32_t title_id, bool blocking) {
-  // No translated shader storage of our own yet; the base caches its own
-  // translated shaders.
-  vulkan::VulkanCommandProcessor::InitializeShaderStorage(cache_root, title_id,
-                                                          blocking);
+  // No translated shader storage in the census stage. Kept as a no-op with
+  // the signature intact so a later stage can persist per-shader decisions.
+  (void)cache_root;
+  (void)title_id;
+  (void)blocking;
 }
 
-void MclaNativeCommandProcessor::ClearCaches() {
-  vulkan::VulkanCommandProcessor::ClearCaches();
-}
+void MclaNativeCommandProcessor::ClearCaches() {}
 
-void MclaNativeCommandProcessor::InvalidateGpuMemory() {
-  vulkan::VulkanCommandProcessor::InvalidateGpuMemory();
-}
+void MclaNativeCommandProcessor::InvalidateGpuMemory() {}
 
 void MclaNativeCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
-  vulkan::VulkanCommandProcessor::WriteRegister(index, value);
+  CommandProcessor::WriteRegister(index, value);
   // Surface config is NOT recorded here: color/depth info registers are
   // typically written AFTER RB_SURFACE_INFO, so a record at this point
   // would carry the previous configuration's formats and depth_base -
@@ -114,8 +100,7 @@ Shader *MclaNativeCommandProcessor::LoadShader(xenos::ShaderType shader_type,
                                                const uint32_t *host_address,
                                                uint32_t dword_count) {
   // Hash the host-side (byte-swapped) microcode like the pipeline caches do,
-  // and track the identity of the active pair. The base (Vulkan) pipeline
-  // cache still owns the real Shader object and translation.
+  // and track the identity of the active pair. No translation is performed.
   uint64_t hash =
       XXH3_64bits(host_address, size_t(dword_count) * sizeof(uint32_t));
   if (shader_type == xenos::ShaderType::kVertex) {
@@ -123,10 +108,10 @@ Shader *MclaNativeCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   } else if (shader_type == xenos::ShaderType::kPixel) {
     current_ps_hash_ = hash;
   }
-  // Let the base class load and translate the shader normally; the census
-  // tracks the pair by hash, the base tracks the object itself.
-  return vulkan::VulkanCommandProcessor::LoadShader(shader_type, guest_address,
-                                                    host_address, dword_count);
+  // The base class stores whatever LoadShader returns; the census tracks the
+  // active pair by hash instead, so return null (the same contract as a
+  // failed translation - every consumer in the base checks for null).
+  return nullptr;
 }
 
 bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
@@ -170,7 +155,9 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
 
 bool MclaNativeCommandProcessor::IssueCopy() {
   // IssueCopy covers both resolves (copies) and clears, per RB_COPY_CONTROL.
-  // Census recording is unchanged from stage 1 (the oracle keeps running).
+  // Clears and the copy are independent: clear only, copy only and copy with
+  // clear are all legal in one packet. copy_src_select == 0 is a real RT0
+  // resolve (the most common one) - never treated as a no-op.
   const auto &copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
   const bool copying_depth =
       copy_control.copy_src_select >= xenos::kMaxColorRenderTargets;
@@ -179,6 +166,8 @@ bool MclaNativeCommandProcessor::IssueCopy() {
         true, uint32_t(register_file_->Get<reg::RB_DEPTH_INFO>().depth_format));
   }
   if (copy_control.color_clear_enable) {
+    // The color clear covers the copy source's target (the copied region);
+    // target 0 when the copy source is depth.
     const uint32_t rt = copying_depth ? 0 : copy_control.copy_src_select;
     census_.RecordClear(
         false,
@@ -186,6 +175,9 @@ bool MclaNativeCommandProcessor::IssueCopy() {
             (*register_file_)[reg::RB_COLOR_INFO::rt_register_indices[rt]]));
   }
   if (copy_control.copy_command != xenos::CopyCommand::kNull) {
+    // Raw register reads (Get<> vs union ambiguity avoided) for the full
+    // resolve description: source target/format/base in EDRAM and the
+    // guest destination region with its texture format fields.
     ResolveInfo info;
     info.depth = copying_depth;
     info.src_select = copy_control.copy_src_select;
@@ -220,9 +212,6 @@ bool MclaNativeCommandProcessor::IssueCopy() {
                                       uint32_t(copy_control.copy_command),
                                       uint32_t(copy_control.copy_src_select)));
   }
-  // Stage 2.1 has no render targets yet; copies/clears produce nothing to
-  // present, and the base's shared-memory resolve machinery is NOT invoked
-  // (our stage 2.2 host-texture model replaces it).
   return true;
 }
 
@@ -232,108 +221,6 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // The frontbuffer address is the core datum of the wrong-region analysis:
   // compare it with the frame's last resolve "dest 0x..." key.
   census_.RecordSwap(frontbuffer_width, frontbuffer_height, frontbuffer_ptr);
-
-  // Stage 2.1 presenter test: present a solid color cycling by frame number
-  // (N % 3 -> red/green/blue) so the presenter connection is verifiable on
-  // device with zero real rendering. The path follows the Xenos plugin's
-  // IssueSwap (vulkan/command_processor.cpp:2298+): BeginSubmission ->
-  // RefreshGuestOutput callback -> EndSubmission(true). The guest output
-  // image has NO TRANSFER_DST usage (vulkan_presenter.cpp:1596-1597: only
-  // TRANSFER_SRC | SAMPLED | COLOR_ATTACHMENT | STORAGE), so the color is
-  // written with vkCmdBeginRendering + a clear load op, not
-  // vkCmdClearColorImage. Layout contract (presenter.h:71-83): acquire in
-  // UNDEFINED/SHADER_READ_ONLY_OPTIMAL, release in SHADER_READ_ONLY_OPTIMAL.
-  const uint64_t frame = GetCurrentFrame();
-  static constexpr float kColorTable[3][4] = {{1.0f, 0.0f, 0.0f, 1.0f},
-                                              {0.0f, 1.0f, 0.0f, 1.0f},
-                                              {0.0f, 0.0f, 1.0f, 1.0f}};
-  const float *color = kColorTable[frame % 3];
-
-  ui::Presenter *presenter = graphics_system_->presenter();
-  if (!presenter) {
-    REXLOG_ERROR("stage2.1 frame {}: no presenter", uint64_t(frame));
-  } else {
-    const uint32_t width = frontbuffer_width ? frontbuffer_width : 1280;
-    const uint32_t height = frontbuffer_height ? frontbuffer_height : 720;
-    system::X_VIDEO_MODE video_mode;
-    kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
-    presenter->RefreshGuestOutput(
-        width, height,
-        std::max(uint32_t(1), uint32_t(video_mode.display_width)),
-        std::max(uint32_t(1), uint32_t(video_mode.display_height)),
-        [this, width, height,
-         color](ui::Presenter::GuestOutputRefreshContext &context) -> bool {
-          auto &vulkan_context = static_cast<
-              ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext &>(
-              context);
-
-          if (!vulkan::VulkanCommandProcessor::BeginSubmission(true)) {
-            return false;
-          }
-          // In case the swap command is the only one in the frame.
-          VkImageSubresourceRange subresource_range =
-              ui::vulkan::util::InitializeSubresourceRange();
-
-          // Acquire the guest output image for a color attachment write.
-          // UNDEFINED old layout is safe in both cases: the image is fully
-          // overwritten by the clear.
-          PushImageMemoryBarrier(
-              vulkan_context.image(), subresource_range,
-              vulkan_context.image_ever_written_previously()
-                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask
-                  : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-              vulkan_context.image_ever_written_previously()
-                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask
-                  : 0,
-              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-          SubmitBarriers(true);
-
-          VkRenderingAttachmentInfo attachment_info = {};
-          attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-          attachment_info.imageView = vulkan_context.image_view();
-          attachment_info.imageLayout =
-              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-          attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-          attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-          attachment_info.clearValue.color = {color[0], color[1], color[2],
-                                              color[3]};
-
-          VkRenderingInfo rendering_info = {};
-          rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-          rendering_info.renderArea.offset = {0, 0};
-          rendering_info.renderArea.extent = {width, height};
-          rendering_info.layerCount = 1;
-          rendering_info.colorAttachmentCount = 1;
-          rendering_info.pColorAttachments = &attachment_info;
-
-          deferred_command_buffer().CmdVkBeginRendering(&rendering_info);
-          deferred_command_buffer().CmdVkEndRendering();
-
-          // Release the image back to the presenter's layout.
-          PushImageMemoryBarrier(
-              vulkan_context.image(), subresource_range,
-              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-              ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask,
-              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-              ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask,
-              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout);
-
-          // The commands must be submitted before the image goes back to the
-          // presenter (vulkan/command_processor.cpp:2946-2950).
-          return vulkan::VulkanCommandProcessor::EndSubmission(true);
-        });
-  }
-
-  const bool log_frame = frame <= 10 || (frame % 60) == 0;
-  if (log_frame) {
-    REXLOG_INFO("stage2.1 frame {} color=({},{},{},{})", uint64_t(frame),
-                color[0], color[1], color[2], color[3]);
-  }
-  vulkan::VulkanCommandProcessor::EndSubmission(true);
-
   census_.EndFrame();
   census_.BeginFrame();
   // The shader pair is deliberately NOT reset: the guest only re-uploads
