@@ -222,6 +222,7 @@ public class LauncherActivity extends Activity {
     private TextView mStatus;
     private TextView mLastLaunch;
     private TextView mGameDirLabel;
+    private TextView mRendererLabel;
 
     private View buildLayout() {
         int pad = dp(20);
@@ -296,6 +297,15 @@ public class LauncherActivity extends Activity {
         LinearLayout.LayoutParams perfParams = new LinearLayout.LayoutParams(dp(260), dp(44));
         perfParams.topMargin = dp(10);
         left.addView(perfTest, perfParams);
+
+        Button rendererBtn = button("Renderer", false);
+        rendererBtn.setOnClickListener(v -> showRendererSettings());
+        LinearLayout.LayoutParams rendererParams = new LinearLayout.LayoutParams(dp(260), dp(44));
+        rendererParams.topMargin = dp(10);
+        left.addView(rendererBtn, rendererParams);
+        mRendererLabel = text(rendererSummary(), 11, R.color.picker_muted);
+        mRendererLabel.setGravity(Gravity.CENTER);
+        left.addView(mRendererLabel, matchWrap(dp(4)));
 
         TextView debugNote = text("The debug log is saved to Android/data/" + getPackageName()
                 + "/files/" + DebugLog.DIRECTORY + "/. Attach the newest one when you open an issue "
@@ -1119,9 +1129,131 @@ public class LauncherActivity extends Activity {
     private static final String PERF_GPU_TURBO = "gpu_turbo";
     private static final String PERF_WATER_REFLECTIONS = "water_reflection_interval";
     private static final String PERF_OTHER_REFLECTIONS = "other_reflection_interval";
+    /** Saved renderer choice (see {@link #showRendererSettings()}). Empty string = default. */
+    private static final String RENDERER_SETTING = "renderer";
+    /** Renderer setting values. These become the {@code --gpu_plugin} argument. */
+    private static final String RENDERER_XENOS = "xenos";
+    private static final String RENDERER_MCLA_NATIVE = "mcla-native";
+    private static final String RENDERER_FH2_NATIVE = "fh2-native";
 
     private android.content.SharedPreferences perfTestPreferences() {
         return getSharedPreferences(PERF_PREFERENCES, Context.MODE_PRIVATE);
+    }
+
+    /** One-line summary under the Renderer button. */
+    private String rendererSummary() {
+        String renderer = perfTestPreferences().getString(RENDERER_SETTING, "");
+        if (RENDERER_MCLA_NATIVE.equals(renderer))
+            return "Current: MCLA native (experimental)";
+        if (RENDERER_FH2_NATIVE.equals(renderer))
+            return "Current: FH2 native (experimental)";
+        return "Current: Xenos (emulated, default)";
+    }
+
+    private void showRendererSettings() {
+        android.content.SharedPreferences perf = perfTestPreferences();
+        String current = perf.getString(RENDERER_SETTING, "");
+
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(18), dp(14), dp(18), dp(14));
+        card.setBackground(rounded(color(R.color.picker_card), dp(10)));
+
+        TextView title = text("Renderer", 18, R.color.picker_text);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(title);
+        card.addView(text("Which renderer draws the game. You can change this at any time; "
+                + "the next launch uses the new choice.", 12, R.color.picker_muted),
+                matchWrap(dp(4)));
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+
+        RadioGroup group = new RadioGroup(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+        String[][] options = {
+                // value, label, description
+                {RENDERER_XENOS, "Xenos (emulated, default)",
+                        "The GPU command stream is interpreted and the Xenos GPU is "
+                                + "emulated on Vulkan. The faithful renderer; slower."},
+                {RENDERER_MCLA_NATIVE, "MCLA native (experimental)",
+                        "Draws the same commands straight in Vulkan with shaders translated "
+                                + "ahead of time from this game's files. Much faster; some image "
+                                + "errors may remain."},
+                {RENDERER_FH2_NATIVE, "FH2 native (experimental)",
+                        "The fh2-recompiled native renderer adapted to this game. Reads the "
+                                + "same command stream and draws it in Vulkan. Experimental; may "
+                                + "show wrong images where the game differs from FH2."},
+        };
+        for (String[] option : options) {
+            android.widget.RadioButton button = new android.widget.RadioButton(this);
+            button.setText(option[1]);
+            button.setTextSize(14);
+            button.setTextColor(color(R.color.picker_text));
+            button.setPadding(dp(6), dp(8), dp(6), dp(8));
+            if (option[0].equals(current)) button.setChecked(true);
+            button.setTag(option[0]);
+            button.setOnClickListener(v -> {
+                TextView detail = (TextView) panel.getTag();
+                if (detail != null) detail.setText(option[2]);
+            });
+            group.addView(button, matchWrap(dp(2)));
+        }
+        panel.addView(group, matchWrap(dp(6)));
+
+        // The description of the choice the dialog opens with; each radio
+        // button updates it when picked.
+        TextView description = text("", 12, R.color.picker_muted);
+        panel.setTag(description);
+        for (String[] option : options) {
+            if (option[0].equals(current)) description.setText(option[2]);
+        }
+        panel.addView(description, matchWrap(dp(4)));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(panel);
+        card.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END);
+        Button cancel = button("Cancel", false);
+        Button save = button("Save", true);
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(dp(120), dp(44));
+        LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(dp(120), dp(44));
+        saveParams.leftMargin = dp(10);
+        buttons.addView(cancel, cancelParams);
+        buttons.addView(save, saveParams);
+        card.addView(buttons, matchWrap(dp(12)));
+
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        save.setOnClickListener(v -> {
+            int checkedId = group.getCheckedRadioButtonId();
+            String value = "";
+            if (checkedId != -1) {
+                android.widget.RadioButton checked = findViewById(checkedId);
+                value = (String) checked.getTag();
+            }
+            perf.edit().putString(RENDERER_SETTING, value == null ? "" : value).apply();
+            dialog.dismiss();
+            if (mRendererLabel != null) mRendererLabel.setText(rendererSummary());
+        });
+
+        dialog.setContentView(card);
+        android.view.Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(
+                    android.graphics.Color.TRANSPARENT));
+            android.view.WindowManager.LayoutParams params = window.getAttributes();
+            params.width = (int) (getResources().getDisplayMetrics().widthPixels * 0.85);
+            params.height = (int) (getResources().getDisplayMetrics().heightPixels * 0.7);
+            window.setAttributes(params);
+        }
+        dialog.show();
     }
 
     private void showPerformanceTestSettings() {
@@ -1281,6 +1413,12 @@ public class LauncherActivity extends Activity {
                 if (debugLog) intent.putExtra(MclaActivity.EXTRA_DEBUG_LOG, true);
                 String gameDir = savedGameDir();
                 if (gameDir != null) intent.putExtra("mcla_game_dir", gameDir);
+                // Renderer choice (xenos / mcla-native / fh2-native); see the
+                // renderer settings dialog. Empty = host default (xenos).
+                String renderer = perfTestPreferences().getString(RENDERER_SETTING, "");
+                if (renderer != null && !renderer.isEmpty()) {
+                    intent.putExtra("mcla_renderer", renderer);
+                }
                 android.content.SharedPreferences perf = perfTestPreferences();
                 intent.putExtra(MclaActivity.EXTRA_SHADOWS_OFF, perf.getBoolean(PERF_SHADOWS_OFF, false));
                 intent.putExtra(MclaActivity.EXTRA_HALF_DRAW_DISTANCE,

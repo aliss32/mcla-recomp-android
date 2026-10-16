@@ -115,4 +115,59 @@ if(COMMAND rexglue_apply_target_settings)
     rexglue_apply_target_settings(rexgpu-mcla-native)
 endif()
 
+# Stage 0 (dump) plugin: same census plumbing + container dumper. Selected with
+# --gpu_plugin=mcla-dump. Shares the census sources; adds the dumper.
+set(REXGPU_MCLA_DUMP_SOURCES
+    src/dump/dump_main.cpp
+    src/dump/dump_graphics_system.cpp
+    src/dump/container_dumper.cpp
+    src/native/graphics_system.cpp
+    src/native/command_processor.cpp
+    src/native/frame_census.cpp
+    src/native/heartbeat.cpp
+    src/native/render_target_manager.cpp
+    src/native/present_pass.cpp
+    src/native/frame_dump.cpp
+    ${REXSDK_DIR}/src/graphics/command_processor.cpp
+    ${REXSDK_DIR}/src/graphics/graphics_system.cpp
+    ${REXSDK_DIR}/src/graphics/registers.cpp
+    ${REXSDK_DIR}/src/graphics/register_file.cpp
+    ${REXSDK_DIR}/src/graphics/packet_disassembler.cpp
+    ${REXSDK_DIR}/src/graphics/util/draw.cpp
+    ${REXSDK_DIR}/src/graphics/util/draw_extent_estimator.cpp
+)
+add_library(rexgpu-mcla-dump SHARED ${REXGPU_MCLA_DUMP_SOURCES})
+add_library(rex::gpu-mcla-dump ALIAS rexgpu-mcla-dump)
+set_target_properties(rexgpu-mcla-dump PROPERTIES
+    OUTPUT_NAME "rexgpu-mcla-dump"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+target_include_directories(rexgpu-mcla-dump PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${REXSDK_DIR}
+    ${REXSDK_DIR}/thirdparty/renderdoc
+)
+target_link_libraries(rexgpu-mcla-dump PRIVATE rex::runtime xxHash::xxhash)
+if(ANDROID)
+    target_link_libraries(rexgpu-mcla-dump PRIVATE log)
+    target_link_options(rexgpu-mcla-dump PRIVATE "-Wl,--error-limit=0")
+endif()
+if(REXGLUE_USE_VULKAN)
+    target_link_libraries(rexgpu-mcla-dump PRIVATE
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
+    )
+endif()
+if(TARGET Vulkan::Headers)
+    target_link_libraries(rexgpu-mcla-dump PRIVATE Vulkan::Headers)
+endif()
+if(COMMAND rexglue_apply_target_settings)
+    rexglue_apply_target_settings(rexgpu-mcla-dump)
+endif()
+
 rexglue_setup_target(mcla GPU_PLUGINS xenos)

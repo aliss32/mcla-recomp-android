@@ -199,7 +199,16 @@ public class MclaActivity extends SDLActivity {
     // The launcher's performance test settings replace these cvars' lines in
     // args.txt for this run (the file itself is left as it is).
     private void applyPerformanceTestArguments(List<String> arguments) {
+        // The launcher's renderer choice (see LauncherActivity): replace any
+        // existing --gpu_plugin line. Empty = keep whatever args.txt says.
         Intent intent = getIntent();
+        if (intent != null && intent.hasExtra("mcla_renderer")) {
+            String renderer = intent.getStringExtra("mcla_renderer");
+            if (renderer != null && !renderer.isEmpty()) {
+                arguments.removeIf(a -> a.startsWith("--gpu_plugin"));
+                arguments.add("--gpu_plugin=" + renderer);
+            }
+        }
         if (intent == null || !intent.hasExtra(EXTRA_SHADOWS_OFF)) return;
         boolean shadowsOff = intent.getBooleanExtra(EXTRA_SHADOWS_OFF, false);
         arguments.removeIf(a -> a.startsWith("--mcla_shadows")

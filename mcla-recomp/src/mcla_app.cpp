@@ -124,7 +124,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // The census runs in the native plugin; it reads the path itself through
   // the cvar, but default it under the log directory so a run without flags
   // still records somewhere writable.
-  if (config.gpu_plugin == "mcla-native") {
+  if (config.gpu_plugin == "mcla-native" || config.gpu_plugin == "mcla-dump") {
     std::string census = REXCVAR_GET(mcla_native_census);
     if (census.empty()) {
       std::filesystem::path base =
