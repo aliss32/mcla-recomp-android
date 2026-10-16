@@ -7,9 +7,10 @@
 #include <rex/logging.h>
 #include <rex/ui/vulkan/util.h>
 
-#include <SPIRV/GlslangToSpv.h>
 #include <glslang/Include/ResourceLimits.h>
+#include <glslang/Public/ResourceLimits.h>
 #include <glslang/Public/ShaderLang.h>
+#include <SPIRV/GlslangToSpv.h>
 
 namespace rex::graphics::mcla_native {
 
@@ -50,32 +51,7 @@ void main() {
 // glslang's required (mostly unused) default resource limits, mirroring the
 // SDK's kGlslangDefaultTBuiltInResource.
 TBuiltInResource GetGlslangResource() {
-  TBuiltInResource resource = {};
-  resource.maxLights = 32;
-  resource.maxClipPlanes = 6;
-  resource.maxTextureUnits = 32;
-  resource.maxTextureCoords = 32;
-  resource.maxVertexAttribs = 64;
-  resource.maxVertexUniformComponents = 4096;
-  resource.maxVaryingFloats = 64;
-  resource.maxVertexTextureImageUnits = 32;
-  resource.maxCombinedTextureImageUnits = 80;
-  resource.maxTextureImageUnits = 32;
-  resource.maxFragmentUniformComponents = 4096;
-  resource.maxDrawBuffers = 32;
-  resource.maxClipDistances = 8;
-  resource.maxComputeWorkGroupCount[0] = 65535;
-  resource.maxComputeWorkGroupCount[1] = 65535;
-  resource.maxComputeWorkGroupCount[2] = 65535;
-  resource.maxComputeWorkGroupSize[0] = 1024;
-  resource.maxComputeWorkGroupSize[1] = 1024;
-  resource.maxComputeWorkGroupSize[2] = 64;
-  resource.maxComputeUniformComponents = 1024;
-  resource.maxTextureSize = 16384;
-  resource.maxTexelOffset = 7;
-  resource.maxImageUnits = 8;
-  resource.maxSamples = 4;
-  return resource;
+  return *glslang::GetDefaultResources();
 }
 
 bool CompileGlsl(EShLanguage stage, const char *source,
