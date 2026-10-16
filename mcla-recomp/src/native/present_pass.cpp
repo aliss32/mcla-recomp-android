@@ -11,6 +11,10 @@
 #include <glslang/Public/ShaderLang.h>
 #include <SPIRV/GlslangToSpv.h>
 
+// VulkanDevice::Functions shorthand for the member definitions below; the
+// device type is ui::vulkan::VulkanDevice (via present_pass.h -> device.h).
+using VulkanDevice = ui::vulkan::VulkanDevice;
+
 namespace rex::graphics::mcla_native {
 
 namespace {
@@ -53,7 +57,8 @@ void main() {
 // in that revision the table lives in the StandAlone build target, which the
 // mcla-native link set does not pull in, and Public/ResourceLimits.h does not
 // exist - so the table is reproduced here.
-TBuiltInResource GetGlslangResource() {
+const TBuiltInResource &GetGlslangResource() {
+  static const TBuiltInResource kResources = []() {
   TBuiltInResource resource = {};
   resource.maxLights = 32;
   resource.maxClipPlanes = 6;
@@ -158,6 +163,8 @@ TBuiltInResource GetGlslangResource() {
   resource.limits.generalVariableIndexing = 1;
   resource.limits.generalConstantMatrixVectorIndexing = 1;
   return resource;
+}();
+  return kResources;
 }
 
 bool CompileGlsl(EShLanguage stage, const char *source,
