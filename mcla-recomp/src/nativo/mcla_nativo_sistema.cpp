@@ -102,7 +102,7 @@ std::string Resumen();
 
 #if REX_PLATFORM_SWITCH
 // Only for RexSwitchSetCurrentThreadPriority. That header deliberately does not include switch.h.
-#include "../../sdk/src/core/threading_switch.h"
+// Horizon-only SDK shim; not needed on Android.
 #endif
 
 REXCVAR_DEFINE_STRING(mcla_renderizador, "xenos", "mcla",

@@ -750,8 +750,8 @@ namespace mcla::nativo {
 namespace shaders {
 // The same SPIR-V the SDK presenter uses to draw the game image
 // (vulkan_presenter.cpp:128-141).
-#include "vulkan_spirv/guest_output_bilinear_ps.h"
-#include "vulkan_spirv/guest_output_triangle_strip_rect_vs.h"
+#include "shaders/vulkan_spirv/guest_output_bilinear_ps.h"
+#include "shaders/vulkan_spirv/guest_output_triangle_strip_rect_vs.h"
 // The same sampling as guest_output_bilinear_ps with the game's gamma ramp
 // (shaders/mcla_salida_rampa_gamma.frag).
 #include "shaders/mcla_salida_rampa_gamma_ps.h"

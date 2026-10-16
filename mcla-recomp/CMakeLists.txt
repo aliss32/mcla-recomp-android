@@ -115,6 +115,54 @@ if(COMMAND rexglue_apply_target_settings)
     rexglue_apply_target_settings(rexgpu-mcla-native)
 endif()
 
+# fh2-recompiled native renderer (stage 2): full PM4 ring renderer, guarded by
+# MCLA_RECOMP. Sources in src/nativo; selected with --gpu_plugin=mcla-fhnative.
+file(GLOB REXGPU_MCLA_FHNATIVE_SOURCES CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/nativo/*.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/fhnative/plugin_main.cpp)
+list(APPEND REXGPU_MCLA_FHNATIVE_SOURCES
+    src/native/graphics_system.cpp
+    src/native/command_processor.cpp
+    src/native/heartbeat.cpp
+    src/native/render_target_manager.cpp
+    src/native/present_pass.cpp
+    src/native/frame_dump.cpp
+    ${REXSDK_DIR}/src/graphics/command_processor.cpp
+    ${REXSDK_DIR}/src/graphics/graphics_system.cpp
+    ${REXSDK_DIR}/src/graphics/registers.cpp
+    ${REXSDK_DIR}/src/graphics/register_file.cpp
+    ${REXSDK_DIR}/src/graphics/packet_disassembler.cpp
+    ${REXSDK_DIR}/src/graphics/util/draw.cpp
+    ${REXSDK_DIR}/src/graphics/util/draw_extent_estimator.cpp
+)
+add_library(rexgpu-mcla-fhnative SHARED ${REXGPU_MCLA_FHNATIVE_SOURCES})
+add_library(rex::gpu-mcla-fhnative ALIAS rexgpu-mcla-fhnative)
+set_target_properties(rexgpu-mcla-fhnative PROPERTIES
+    OUTPUT_NAME "rexgpu-mcla-fhnative"
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_compile_definitions(rexgpu-mcla-fhnative PRIVATE MCLA_RECOMP=1)
+target_include_directories(rexgpu-mcla-fhnative PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${REXSDK_DIR}
+    ${REXSDK_DIR}/thirdparty/renderdoc
+)
+target_link_libraries(rexgpu-mcla-fhnative PRIVATE rex::runtime xxHash::xxhash)
+if(ANDROID)
+    target_link_libraries(rexgpu-mcla-fhnative PRIVATE log)
+endif()
+if(REXGLUE_USE_VULKAN)
+    target_link_libraries(rexgpu-mcla-fhnative PRIVATE
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+    )
+endif()
+if(TARGET Vulkan::Headers)
+    target_link_libraries(rexgpu-mcla-fhnative PRIVATE Vulkan::Headers)
+endif()
+
 # Stage 0 (dump) plugin: same census plumbing + container dumper. Selected with
 # --gpu_plugin=mcla-dump. Shares the census sources; adds the dumper.
 set(REXGPU_MCLA_DUMP_SOURCES

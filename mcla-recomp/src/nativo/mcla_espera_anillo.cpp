@@ -127,7 +127,7 @@ bool EsperarProgresoAnillo(uint32_t visto, std::chrono::microseconds limite) {
 }  // namespace mcla::nativo
 
 // Most Wanted's D3D waits. (MCLA uses these same hooks.)
-#if !defined(MCLA_RECOMP) && !defined(MCLA_RECOMP)
+#if !defined(MCLA_RECOMP)
 namespace {
 
 constexpr uint32_t kOffLecturaDevuelta = 10384;  // pointer to the word where the GPU reports the read pointer

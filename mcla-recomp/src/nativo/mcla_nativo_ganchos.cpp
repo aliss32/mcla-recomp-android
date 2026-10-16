@@ -256,24 +256,24 @@ void RecordarCreacion(uint32_t objeto, const EntradaShader* entrada, bool vertic
 
 #if defined(MCLA_RECOMP)
 namespace {
-std::mutex g_Mcla_parches_mutex;
-std::unordered_map<uint32_t, uint32_t> g_Mcla_parches;  // physical address of a patched copy -> VS object
-std::atomic<uint64_t> g_Mcla_aciertos{0}, g_Mcla_fallos{0};
+std::mutex g_fh2_parches_mutex;
+std::unordered_map<uint32_t, uint32_t> g_fh2_parches;  // physical address of a patched copy -> VS object
+std::atomic<uint64_t> g_fh2_aciertos{0}, g_fh2_fallos{0};
 }  // namespace
 
-void mclaAnotarParcheVs(uint32_t objeto, uint32_t destino) {
+void fh2AnotarParcheVs(uint32_t objeto, uint32_t destino) {
   // Guest virtual -> physical, as the ring's IM_LOAD addresses are (the 0xE0000000 view is 4 KB ahead).
   const uint32_t fisico = (destino & 0x1FFFFFFFu) + (destino >= 0xE0000000u ? 0x1000u : 0u);
-  std::lock_guard<std::mutex> cerrojo(g_Mcla_parches_mutex);
-  g_Mcla_parches.insert_or_assign(fisico, objeto);
+  std::lock_guard<std::mutex> cerrojo(g_fh2_parches_mutex);
+  g_fh2_parches.insert_or_assign(fisico, objeto);
 }
 
-const EntradaShader* mclaVsPorDireccion(uint32_t fisico) {
+const EntradaShader* fh2VsPorDireccion(uint32_t fisico) {
   uint32_t objeto = 0;
   {
-    std::lock_guard<std::mutex> cerrojo(g_Mcla_parches_mutex);
-    const auto it = g_Mcla_parches.find(fisico);
-    if (it != g_Mcla_parches.end()) objeto = it->second;
+    std::lock_guard<std::mutex> cerrojo(g_fh2_parches_mutex);
+    const auto it = g_fh2_parches.find(fisico);
+    if (it != g_fh2_parches.end()) objeto = it->second;
   }
   const EntradaShader* entrada = nullptr;
   if (objeto) {
@@ -281,14 +281,14 @@ const EntradaShader* mclaVsPorDireccion(uint32_t fisico) {
     const auto it = g_objetos.find(objeto);
     if (it != g_objetos.end()) entrada = it->second;
   }
-  (entrada ? g_Mcla_aciertos : g_Mcla_fallos).fetch_add(1, std::memory_order_relaxed);
+  (entrada ? g_fh2_aciertos : g_fh2_fallos).fetch_add(1, std::memory_order_relaxed);
   return entrada;
 }
 
-const EntradaShader* mclaVsPorContenido(const uint8_t* memoria, const uint8_t* microcodigo, size_t bytes) {
+const EntradaShader* fh2VsPorContenido(const uint8_t* memoria, const uint8_t* microcodigo, size_t bytes) {
   uint32_t objeto = 0;
   {
-    std::lock_guard<std::mutex> cerrojo(g_Mcla_parches_mutex);
+    std::lock_guard<std::mutex> cerrojo(g_fh2_parches_mutex);
     {
       // Diagnostics: the nearest reported destination to this copy.
       static int avisos = 0;
@@ -297,7 +297,7 @@ const EntradaShader* mclaVsPorContenido(const uint8_t* memoria, const uint8_t* m
         ++avisos;
         int64_t mejor = INT64_MAX;
         uint32_t mejor_destino = 0;
-        for (const auto& [destino, candidato] : g_Mcla_parches) {
+        for (const auto& [destino, candidato] : g_fh2_parches) {
           const int64_t d = int64_t(fisico) - int64_t(destino);
           if (std::llabs(d) < std::llabs(mejor)) {
             mejor = d;
@@ -305,10 +305,10 @@ const EntradaShader* mclaVsPorContenido(const uint8_t* memoria, const uint8_t* m
           }
         }
         REXLOG_INFO("[mcla nativo] VS inmediato en {:08X} ({} bytes): destino mas cercano {:08X} (distancia {}), {} "
-                    "destinos", fisico, bytes, mejor_destino, mejor, g_Mcla_parches.size());
+                    "destinos", fisico, bytes, mejor_destino, mejor, g_fh2_parches.size());
       }
     }
-    for (const auto& [fisico, candidato] : g_Mcla_parches) {
+    for (const auto& [fisico, candidato] : g_fh2_parches) {
       if (fisico < 0x20000000u - bytes && std::memcmp(memoria + fisico, microcodigo, bytes) == 0) {
         objeto = candidato;
         break;
@@ -321,13 +321,13 @@ const EntradaShader* mclaVsPorContenido(const uint8_t* memoria, const uint8_t* m
     const auto it = g_objetos.find(objeto);
     if (it != g_objetos.end()) entrada = it->second;
   }
-  (entrada ? g_Mcla_aciertos : g_Mcla_fallos).fetch_add(1, std::memory_order_relaxed);
+  (entrada ? g_fh2_aciertos : g_fh2_fallos).fetch_add(1, std::memory_order_relaxed);
   return entrada;
 }
 
-void mclaEstadisticasParches(uint64_t& aciertos, uint64_t& fallos) {
-  aciertos = g_Mcla_aciertos.load(std::memory_order_relaxed);
-  fallos = g_Mcla_fallos.load(std::memory_order_relaxed);
+void fh2EstadisticasParches(uint64_t& aciertos, uint64_t& fallos) {
+  aciertos = g_fh2_aciertos.load(std::memory_order_relaxed);
+  fallos = g_fh2_fallos.load(std::memory_order_relaxed);
 }
 #endif
 
@@ -1064,7 +1064,7 @@ EstadisticasGanchos EstadisticasDeGanchos() {
 // The experimental library (mcla_shader_hooks.cpp) hooks the same constructors; with it enabled these
 // are not compiled.
 // (Game-specific hook addresses live in each game's own recomp project.) These addresses are MCLA's.
-#if !defined(mcla_NATIVE_SHADER_LIBRARY) && !defined(MCLA_RECOMP) && !defined(MCLA_RECOMP)
+#if !defined(mcla_NATIVE_SHADER_LIBRARY) && !defined(MCLA_RECOMP)
 // r3 = original container; they return the object in r3. The original is always called and no PPC
 // register is touched.
 REX_EXTERN(__imp__sub_8259BC90);
@@ -1100,7 +1100,7 @@ REX_HOOK_RAW(sub_8259C038) {  // vertex shader
  * switch off with DIFERENCIA).
  * It changes no PPC register.
  */
-#if !defined(MCLA_RECOMP) && !defined(MCLA_RECOMP)
+#if !defined(MCLA_RECOMP)
 REX_EXTERN(__imp__sub_825A2FB8);
 REX_HOOK_RAW(sub_825A2FB8) {
   namespace mc = mcla::nativo::microcodigo;

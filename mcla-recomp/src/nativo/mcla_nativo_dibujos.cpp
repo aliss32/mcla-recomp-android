@@ -111,7 +111,7 @@ static const uint32_t kSpirvResplandorSuave[1] = {0};
 #if REX_PLATFORM_SWITCH
 // Only for RexSwitchSetCurrentThreadPriorityOk (texture bind thread). That header deliberately does not
 // include switch.h (same as in mcla_nativo_sistema.cpp).
-#include "../../sdk/src/core/threading_switch.h"
+// Horizon-only SDK shim; not needed on Android.
 #endif
 
 /*

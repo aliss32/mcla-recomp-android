@@ -222,18 +222,18 @@ const EntradaShader* IdentificarCreacion(const uint8_t* base, uint32_t direccion
 void RecordarCreacion(uint32_t objeto, const EntradaShader* entrada, bool vertices);
 }  // namespace ganchos_detalle
 
-#if defined(MCLA_RECOMP)
+#if defined(FH2_RECOMP)
 // Forza Horizon 2: its D3D loads most vertex shaders from copies its fetch patcher (sub_8241ACA0) wrote for the
 // bound vertex declaration, which the microcode alone does not identify. The patcher hook reports each copy
 // (destination as the game passes it, VS object), and the ring looks up an IM_LOAD's physical address there.
-void mclaAnotarParcheVs(uint32_t objeto, uint32_t destino);
-const EntradaShader* mclaVsPorDireccion(uint32_t fisico);
-// The same for a copy of a patched variant somewhere else (mcla's D3D copies a variant into the ring as an
+void fh2AnotarParcheVs(uint32_t objeto, uint32_t destino);
+const EntradaShader* fh2VsPorDireccion(uint32_t fisico);
+// The same for a copy of a patched variant somewhere else (FH2's D3D copies a variant into the ring as an
 // IM_LOAD_IMMEDIATE): the reported destination whose memory holds this microcode (guest byte order). memoria is the
 // host pointer of guest physical address 0.
-const EntradaShader* mclaVsPorContenido(const uint8_t* memoria, const uint8_t* microcodigo, std::size_t bytes);
+const EntradaShader* fh2VsPorContenido(const uint8_t* memoria, const uint8_t* microcodigo, std::size_t bytes);
 // Lookups since the start: found, and not found.
-void mclaEstadisticasParches(uint64_t& aciertos, uint64_t& fallos);
+void fh2EstadisticasParches(uint64_t& aciertos, uint64_t& fallos);
 #endif
 
 }  // namespace mcla::nativo

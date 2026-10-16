@@ -1,0 +1,3 @@
+﻿1071: // r3 = original container; they return the object in r3. The original is always called and no PPC | // register is touched. | REX_EXTERN(__imp__sub_8259BC90); | REX_HOOK_RAW(sub_8259BC90) {  // pixel shader
+1080: } |  | REX_EXTERN(__imp__sub_8259C038); | REX_HOOK_RAW(sub_8259C038) {  // vertex shader
+1105:  */ | #if !defined(MCLA_RECOMP) && !defined(MCLA_RECOMP) | REX_EXTERN(__imp__sub_825A2FB8); | REX_HOOK_RAW(sub_825A2FB8) {
