@@ -1,14 +1,19 @@
-// MCLA native renderer, stage 1: census command processor.
+// MCLA native renderer, stage 2.1: presenter test command processor.
 //
-// Derives from the SDK's Xenos CommandProcessor base, which decodes the PM4
-// ring and maintains the register file, and records what each frame would
-// draw instead of drawing it. Every draw, resolve, clear and swap is either
-// counted in the frame census or, when something unexpected appears that the
-// census cannot classify, logged explicitly. Nothing is dropped silently.
+// Derives from the SDK's VulkanCommandProcessor: the full Vulkan submission
+// machinery (fences, queues, deferred command buffer, caches) is inherited,
+// and IssueSwap presents a solid color to the presenter's guest-output image
+// so the presenter connection itself can be verified on device before any
+// real rendering exists. Draws are census-only (as in stage 1): the base
+// IssueDraw is not used yet.
 //
-// The base class handles the whole guest protocol (fences, interrupts,
-// WAIT_REG_MEM, ME_INIT, read-pointer writeback), so the guest runs at its
-// normal pace while the census is recorded.
+// Layout contract (include/rex/ui/vulkan/presenter.h:71-83): the guest
+// output image is VK_FORMAT_A2B10G10R10_UNORM_PACK32; it is acquired in
+// SHADER_READ_ONLY_OPTIMAL (or UNDEFINED on first write) and must be
+// released in SHADER_READ_ONLY_OPTIMAL. The image supports color-attachment
+// and sampled usage (vulkan_presenter.cpp:1596-1597 - no TRANSFER_DST), so
+// the clear is done with a render pass + vkCmdClearAttachments, not
+// vkCmdClearColorImage.
 
 #pragma once
 
@@ -18,9 +23,9 @@
 
 #include "frame_census.h"
 
-#include <rex/graphics/command_processor.h>
-#include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/registers.h>
+#include <rex/graphics/vulkan/command_processor.h>
+#include <rex/graphics/vulkan/graphics_system.h>
 #include <rex/graphics/xenos.h>
 #include <rex/system/kernel_state.h>
 #include <rex/types.h>
@@ -31,9 +36,9 @@ namespace rex::graphics::mcla_native {
 
 class MclaNativeGraphicsSystem;
 
-class MclaNativeCommandProcessor : public CommandProcessor {
+class MclaNativeCommandProcessor : public vulkan::VulkanCommandProcessor {
 public:
-  MclaNativeCommandProcessor(MclaNativeGraphicsSystem *graphics_system,
+  MclaNativeCommandProcessor(vulkan::VulkanGraphicsSystem *graphics_system,
                              system::KernelState *kernel_state);
   ~MclaNativeCommandProcessor() override;
 
