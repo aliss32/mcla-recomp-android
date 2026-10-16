@@ -52,6 +52,9 @@ set(REXGPU_MCLA_NATIVE_SOURCES
     src/native/graphics_system.cpp
     src/native/command_processor.cpp
     src/native/frame_census.cpp
+    src/native/render_target_manager.cpp
+    src/native/present_pass.cpp
+    src/native/frame_dump.cpp
     # SDK graphics sources the census subclass links against. The base
     # classes live only in the rexgpu-xenos target's source list, and this
     # plugin must not link that plugin (duplicate plugin_main), so the
@@ -82,6 +85,19 @@ target_include_directories(rexgpu-mcla-native PRIVATE
 # xxhash.h comes from the vendored xxHash submodule through the xxHash::xxhash
 # target (the same dependency the Xenos plugin links).
 target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime xxHash::xxhash)
+# glslang for the present pass GLSL->SPIR-V (same link set rexgpu-xenos gets,
+# src/graphics/CMakeLists.txt:146-157). A missing target fails the configure
+# step - no silent fallback.
+if(REXGLUE_USE_VULKAN)
+    target_link_libraries(rexgpu-mcla-native PRIVATE
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
+    )
+endif()
 # Show every missing symbol in one link, not one per retry (lld only).
 if(ANDROID)
     target_link_options(rexgpu-mcla-native PRIVATE "-Wl,--error-limit=0")

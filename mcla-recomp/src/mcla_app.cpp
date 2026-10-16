@@ -23,6 +23,12 @@ REXCVAR_DEFINE_STRING(mcla_native_census, "", "MCLA",
                       "Native renderer stage 1: write the frame contract census to this "
                       "file (JSON Lines). Empty disables the census");
 
+// Stage 2.2 debug: when nonzero, dump every resolve destination and the
+// presented image of frame N as PNGs into the app's writable directory.
+REXCVAR_DEFINE_INT32(mcla_native_dump_frame, 0, "MCLA",
+                   "Native renderer stage 2.2: dump all resolve targets and the "
+                   "presented image of this frame number as PNGs. 0 disables");
+
 // The runtime's rotating log must never land beside the executable: on Android
 // that is /system/bin (read-only), and create_directories there aborts the
 // game right after SDL_main starts. Set the log file explicitly so the SDK's
