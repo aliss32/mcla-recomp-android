@@ -92,6 +92,12 @@ private:
   uint32_t pending_resolve_height_ = 0;
   bool pending_resolve_src_is_depth_ = false;
 
+  // vkCmdResolveImage/vkCmdCopyImage are absent from the SDK's
+  // VulkanDevice::Functions (device_1_0.inc); fetched once via
+  // vkGetDeviceProcAddr at first use.
+  PFN_vkCmdResolveImage transfer_resolve_ = nullptr;
+  PFN_vkCmdCopyImage transfer_copy_image_ = nullptr;
+
   VkCommandPool present_command_pool_ = VK_NULL_HANDLE;
   VkCommandBuffer present_command_buffer_ = VK_NULL_HANDLE;
   VkFence present_fence_ = VK_NULL_HANDLE;

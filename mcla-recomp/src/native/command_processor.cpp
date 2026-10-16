@@ -625,25 +625,49 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             resolve_region.dstSubresource.layerCount = 1;
             resolve_region.extent = {pending_resolve_width_,
                                      pending_resolve_height_, 1};
-            if (pending_resolve_src_msaa_ >= 2) {
-              dfn.vkCmdResolveImage(
-                  present_command_buffer_, pending_resolve_src_image_,
-                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  pending_resolve_dst_image_,
-                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve_region);
-            } else {
-              VkImageCopy copy_region = {};
-              copy_region.srcSubresource = resolve_region.srcSubresource;
-              copy_region.dstSubresource = resolve_region.dstSubresource;
-              copy_region.extent = resolve_region.extent;
-              dfn.vkCmdCopyImage(
-                  present_command_buffer_, pending_resolve_src_image_,
-                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  pending_resolve_dst_image_,
-                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+            // These two transfer commands are absent from the SDK's
+            // VulkanDevice::Functions (device_1_0.inc has only
+            // vkCmdClearColorImage/vkCmdCopyImageToBuffer; the Xenos plugin
+            // resolves through shared-memory compute instead). The SDK's own
+            // dispatch pattern (device.h:208-225) is per-function pointers,
+            // so fetch the two pointers once through the same loader the SDK
+            // uses - vkGetDeviceProcAddr, itself in Functions (device_1_0.inc).
+            if (transfer_resolve_ == VK_NULL_HANDLE) {
+              // vkGetDeviceProcAddr is an INSTANCE-level function
+              // (instance_1_0.inc).
+              transfer_resolve_ = PFN_vkCmdResolveImage(
+                  vulkan_device->vulkan_instance()
+                      ->functions()
+                      .vkGetDeviceProcAddr(device, "vkCmdResolveImage"));
+              transfer_copy_image_ = PFN_vkCmdCopyImage(
+                  vulkan_device->vulkan_instance()
+                      ->functions()
+                      .vkGetDeviceProcAddr(device, "vkCmdCopyImage"));
+              if (!transfer_resolve_ || !transfer_copy_image_) {
+                REXLOG_WARN(
+                    "stage2.2: vkCmdResolveImage/vkCmdCopyImage unavailable "
+                    "on the device");
+                pending_resolve_dst_image_ = VK_NULL_HANDLE;
+                pending_resolve_src_image_ = VK_NULL_HANDLE;
+              }
             }
-            pending_resolve_dst_image_ = VK_NULL_HANDLE;
-            pending_resolve_src_image_ = VK_NULL_HANDLE;
+            if (pending_resolve_dst_image_ != VK_NULL_HANDLE) {
+              if (pending_resolve_src_msaa_ >= 2) {
+                transfer_resolve_(command_buffer, pending_resolve_src_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  pending_resolve_dst_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                  &resolve_region);
+              } else {
+                transfer_copy_image_(command_buffer, pending_resolve_src_image_,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     pending_resolve_dst_image_,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                     &copy_region);
+              }
+              pending_resolve_dst_image_ = VK_NULL_HANDLE;
+              pending_resolve_src_image_ = VK_NULL_HANDLE;
+            }
           }
 
           // Stage 2.2 debug dump: on the configured frame, dump every resolve
