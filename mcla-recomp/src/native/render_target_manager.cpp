@@ -276,8 +276,11 @@ RenderTargetManager::GetOrCreateResolveTexture(uint32_t dest_base,
     return nullptr;
   }
 
-  const uint32_t bpp = GuestFormatBytesPerPixel(guest_format);
-  const uint32_t width = bpp ? pitch / bpp : 0;
+  // Stage 1.1: the pitch argument is in pixels (the caller passes
+  // copy_dest_pitch, which the Xenos hardware and the SDK treat as pixels -
+  // the 2.2b code divided it by bpp here, turning a 1280-px dest into a
+  // 320-px texture).
+  const uint32_t width = pitch;
   if (!width || !height) {
     LogOnce("resolve_bad_size");
     return nullptr;

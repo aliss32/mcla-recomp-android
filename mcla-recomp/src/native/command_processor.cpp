@@ -5,7 +5,9 @@
 #include <fmt/format.h>
 #include <xxhash.h>
 
+#include <algorithm>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
 #include <rex/system/xvideo.h>
@@ -15,8 +17,30 @@
 #include <rex/ui/vulkan/util.h>
 
 #include "graphics_system.h"
+#include "heartbeat.h"
 
 namespace rex::graphics::mcla_native {
+
+namespace {
+// Stage 1.4: a finite fence wait (2 seconds). The 2.2 build waited forever on
+// a failed submit; a device-lost submit can leave the fence unsignaled and
+// the GPU thread wedged with no diagnostics at all.
+constexpr uint64_t kPresentFenceTimeoutNs = 2'000'000'000ull;
+
+// Stage 1.7: the stage-2.2 debug fill is diagnostic-only (a flat red/blue/
+// green frame proves the resolve->present chain). Once real draws (stage
+// 2.3) run, it must be off or it would overwrite every rendered frame.
+REXCVAR_DEFINE_BOOL(mcla_debug_clear, false, "MCLA",
+                    "Fill resolve-sourced frames with a flat debug colour "
+                    "instead of resolving guest content (stage 2.2 chain "
+                    "proof; turn OFF once real draws run)");
+
+bool DebugClearEnabled() {
+  bool value = false;
+  REXCVAR_QUERY(mcla_debug_clear, &value);
+  return value;
+}
+} // namespace
 
 // The census path cvar is defined by the host (src/mcla_app.cpp, "MCLA"
 // category). The plugin is a separate shared library without the host's
@@ -55,6 +79,10 @@ MclaNativeCommandProcessor::MclaNativeCommandProcessor(
 MclaNativeCommandProcessor::~MclaNativeCommandProcessor() = default;
 
 bool MclaNativeCommandProcessor::SetupContext() {
+  // Stage 0.3: the heartbeat watchdog starts with the processor and runs for
+  // its whole life; its sidecar sits next to the census under the log dir.
+  heartbeat().Initialize(
+      (rex::filesystem::GetUserFolder() / "MclaRecomp" / "logs").string());
   // The host sets --mcla_native_census (default under the log dir) when the
   // plugin is selected; enable the census once here so the first frame is
   // also opened and recorded. An empty path leaves the census off - that is
@@ -92,6 +120,7 @@ void MclaNativeCommandProcessor::ShutdownContext() {
   rt_manager_.Shutdown();
   frame_dump_.Shutdown();
   frame_dump_ready_ = false;
+  heartbeat().Shutdown();
 }
 
 void MclaNativeCommandProcessor::InitializeShaderStorage(
@@ -142,6 +171,9 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
                                            IndexBufferInfo *index_buffer_info,
                                            bool major_mode_explicit) {
   (void)major_mode_explicit;
+  heartbeat().draws().fetch_add(1, std::memory_order_relaxed);
+  heartbeat().gpu_phase().store(GpuPhase::kIssueDraw,
+                                std::memory_order_relaxed);
   // kCopy draws are resolves/clears drawn as primitives; the base
   // CommandProcessor does not route them to IssueCopy, so the backend does
   // (the Xenos plugin does the same).
@@ -177,6 +209,9 @@ bool MclaNativeCommandProcessor::IssueDraw(PrimitiveType prim_type,
 }
 
 bool MclaNativeCommandProcessor::IssueCopy() {
+  heartbeat().copies().fetch_add(1, std::memory_order_relaxed);
+  heartbeat().gpu_phase().store(GpuPhase::kIssueCopy,
+                                std::memory_order_relaxed);
   // IssueCopy covers both resolves (copies) and clears, per RB_COPY_CONTROL.
   // Clears and the copy are independent: clear only, copy only and copy with
   // clear are all legal in one packet. copy_src_select == 0 is a real RT0
@@ -305,6 +340,7 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
   // counted and skipped.
   if (copying_depth) {
     ++skipped_conv;
+    heartbeat().RecordSkip("depth_resolve");
     rt_manager_.LogThrottledKey(
         "depth_resolve_skipped",
         fmt::format("stage2.2: depth resolve skipped (src fmt {} dest fmt {})",
@@ -325,6 +361,7 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
       xenos::ColorFormat(dest_format));
   if (!same_format) {
     ++skipped_conv;
+    heartbeat().RecordSkip("conversion_resolve");
     rt_manager_.LogThrottledKey(
         "conversion_resolve_skipped",
         fmt::format("stage2.2: conversion resolve skipped (src fmt {} dest "
@@ -342,9 +379,14 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
   const uint32_t src_msaa = uint32_t(src_edram.msaa_samples);
   const uint32_t src_bpp =
       RenderTargetManager::GuestFormatBytesPerPixel(src_format);
-  // EDRAM pitch is in tiles (32-byte units) per draw.h:341-343.
-  const uint32_t src_pitch_bytes = src_pitch_tiles * 32;
-  const uint32_t src_width = src_bpp ? src_pitch_bytes / src_bpp : 0;
+  // EDRAM surface pitch is in tiles; one EDRAM tile is 80x16 samples per
+  // xenos.h (kEdramTileWidthSamples = 80), so width_px = pitch_tiles * 80 for
+  // a 1-sample surface, scaled by MSAA sample count otherwise. The 2.2b code
+  // multiplied by 32 (treated tiles as 32-byte rows), creating a 128-px wide
+  // RT for a 1280-px surface and an empty-looking resolve.
+  const uint32_t msaa_x = src_msaa >= 3 ? 2 : (src_msaa >= 2 ? 2 : 1);
+  const uint32_t src_pitch_bytes = src_pitch_tiles * 80 * msaa_x * src_bpp;
+  const uint32_t src_width = src_pitch_tiles * 80 * msaa_x;
   RenderTargetManager::RenderTarget *src_rt = rt_manager_.FindRenderTarget(src_base);
   const bool rt_created = src_rt == nullptr;
   if (rt_created) {
@@ -368,6 +410,10 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
   RenderTargetManager::ResolveTexture *dest_tex =
       rt_manager_.FindResolveTexture(info.copy_dest_base);
   const bool tex_created = dest_tex == nullptr;
+  // Stage 1.1: copy_dest_pitch is ALREADY in pixels (Xenos register docs and
+  // the SDK's GetCopyRectangle both treat it so - device evidence agreed:
+  // dest_pitch=1280 for a 720p surface). The 2.2b code divided by bpp inside
+  // GetOrCreateResolveTexture, creating a 320-px texture for a 1280-px dest.
   dest_tex = rt_manager_.GetOrCreateResolveTexture(
       info.copy_dest_base, dest_pitch, height_px, dest_format, swap_mode);
   if (!dest_tex) {
@@ -390,12 +436,10 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
     ++frame_resolve_logs_;
   }
 
-  // Debug fill: freshly created RTs carry no drawn content yet (stage 2.3
-  // brings real draws); fill the newly created RT with a fixed color per
-  // swap_ptr so the presented frame visibly proves the resolve -> present
-  // chain. Color-format RT only; an MSAA RT still goes through the normal
-  // vkCmdResolveImage path afterwards.
-  pending_resolve_debug_clear_ = rt_created;
+  // Debug fill: gated behind the mcla_debug_clear cvar (stage 1.7). It is a
+  // diagnostic for the resolve->present chain only; with real draws (stage
+  // 2.3) it must stay off or it would overwrite every rendered frame.
+  pending_resolve_debug_clear_ = rt_created && DebugClearEnabled();
   pending_resolve_debug_color_ =
       src_base == 0x07C48000   ? std::array<float, 4>{1.0f, 0.0f, 0.0f, 1.0f}
       : src_base == 0x08378000 ? std::array<float, 4>{0.0f, 0.0f, 1.0f, 1.0f}
@@ -405,12 +449,20 @@ void MclaNativeCommandProcessor::ApplyCopy(uint32_t &clears, uint32_t &applied,
   // Queue the resolve into the present command buffer (single submission per
   // swap). Layout: source RT TRANSFER_SRC_OPTIMAL, dest UNDEFINED ->
   // TRANSFER_DST_OPTIMAL, barriered at drain time in IssueSwap.
+  // Stage 1.1: clamp the resolve region to both images' actual extents - a
+  // resolve region larger than either image is a VkResult error that would
+  // fail the whole present submission.
+  const uint32_t resolve_w =
+      std::min(width_px, std::min(src_rt->width, dest_tex->width));
+  const uint32_t resolve_h =
+      std::min(height_px, std::min(src_rt->height, dest_tex->height));
   pending_resolve_src_image_ = src_rt->image;
   pending_resolve_dst_image_ = dest_tex->image;
   pending_resolve_src_msaa_ = src_rt->msaa;
-  pending_resolve_width_ = width_px;
-  pending_resolve_height_ = height_px;
+  pending_resolve_width_ = resolve_w ? resolve_w : 1;
+  pending_resolve_height_ = resolve_h ? resolve_h : 1;
   pending_resolve_src_is_depth_ = src_rt->is_depth;
+  heartbeat().resolves_applied().fetch_add(1, std::memory_order_relaxed);
   ++applied;
 }
 
@@ -487,6 +539,29 @@ void MclaNativeCommandProcessor::DestroyPresentResources() {
 void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                            uint32_t frontbuffer_width,
                                            uint32_t frontbuffer_height) {
+  // Stage 0.3 heartbeat: every swap stamps the phase, the entry/exit counters
+  // and the distinct swap_ptr count. The watchdog reports a stall from these.
+  auto &hb = heartbeat();
+  hb.gpu_phase().store(GpuPhase::kIssueSwap, std::memory_order_relaxed);
+  hb.swap_enter().fetch_add(1, std::memory_order_relaxed);
+  hb.RecordDistinctSwapPtr(frontbuffer_ptr);
+  // Stage 0.4 scope guard: EndFrame must run on every exit path, including
+  // early returns added later (a missed EndFrame leaves the census frame
+  // unterminated and one frame of data is lost per missed call).
+  struct SwapScope {
+    MclaNativeCommandProcessor &self;
+    ~SwapScope() {
+      heartbeat().gpu_phase().store(GpuPhase::kIdle, std::memory_order_relaxed);
+      heartbeat().swap_exit().fetch_add(1, std::memory_order_relaxed);
+      self.census_.EndFrame();
+      heartbeat().endframe_called().fetch_add(1, std::memory_order_relaxed);
+      heartbeat().endframe_bytes().store(self.census_.last_flush_bytes(),
+                                         std::memory_order_relaxed);
+      self.census_.BeginFrame();
+      ++self.census_frame_count_;
+    }
+  } swap_scope{*this};
+
   // The frontbuffer address is the core datum of the wrong-region analysis:
   // compare it with the frame's last resolve "dest 0x..." key.
   census_.RecordSwap(frontbuffer_width, frontbuffer_height, frontbuffer_ptr);
@@ -547,6 +622,8 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               ui::vulkan::util::InitializeSubresourceRange();
 
           // Acquire the guest output image for a color attachment write.
+          heartbeat().gpu_phase().store(GpuPhase::kPresent,
+                                        std::memory_order_relaxed);
           VkImageMemoryBarrier acquire_barrier = {};
           acquire_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
           acquire_barrier.srcAccessMask =
@@ -593,6 +670,10 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           // swap_ptr, and the swap samples exactly that texture).
           pending_resolve_drained_ = false;
           if (pending_resolve_dst_image_ != VK_NULL_HANDLE) {
+            heartbeat().gpu_phase().store(GpuPhase::kResolveDrain,
+                                          std::memory_order_relaxed);
+            heartbeat().resolves_queued().fetch_add(
+                1, std::memory_order_relaxed);
             // Destination (resolve texture): TRANSFER_DST_OPTIMAL for the
             // write. The real previous layout is tracked: UNDEFINED only
             // when the texture has never been written before (first resolve
@@ -839,17 +920,35 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             const ui::vulkan::VulkanDevice::Queue::Acquisition queue_acq =
                 vulkan_device->AcquireQueue(
                     vulkan_device->queue_family_graphics_compute(), 0);
-            if (dfn.vkQueueSubmit(queue_acq.queue(), 1, &submit_info,
-                                  present_fence_) != VK_SUCCESS) {
-              REXLOG_WARN("stage2.2: vkQueueSubmit failed");
+            heartbeat().gpu_phase().store(GpuPhase::kSubmit,
+                                          std::memory_order_relaxed);
+            VkResult submit_result =
+                dfn.vkQueueSubmit(queue_acq.queue(), 1, &submit_info,
+                                  present_fence_);
+            if (submit_result != VK_SUCCESS) {
+              heartbeat().RecordVkError("vkQueueSubmit", int(submit_result));
+              rt_manager_.LogThrottledKey(
+                  "vk_queue_submit_failed",
+                  fmt::format("stage2.2: vkQueueSubmit failed VkResult {}",
+                              int(submit_result)));
               return false;
             }
           }
-          // 2.2 simplicity: keep waiting on the fence (measured under 30 fps
-          // this does not bound the pipeline; revisit if frame time grows).
-          if (dfn.vkWaitForFences(device, 1, &present_fence_, VK_TRUE,
-                                  UINT64_MAX) != VK_SUCCESS) {
-            REXLOG_WARN("stage2.2: vkWaitForFences failed");
+          // A finite fence wait: an unbounded UINT64_MAX wait on a fence that
+          // will never signal wedges the GPU thread with zero diagnostics -
+          // the heartbeat would show wait_fence forever with no VkResult.
+          // A timeout is recorded (1.4) and the frame is dropped instead.
+          heartbeat().gpu_phase().store(GpuPhase::kWaitFence,
+                                        std::memory_order_relaxed);
+          VkResult wait_result = dfn.vkWaitForFences(
+              device, 1, &present_fence_, VK_TRUE, kPresentFenceTimeoutNs);
+          if (wait_result != VK_SUCCESS) {
+            heartbeat().RecordVkError("vkWaitForFences", int(wait_result));
+            rt_manager_.LogThrottledKey(
+                "present_fence_timeout",
+                fmt::format("stage2.2: vkWaitForFences VkResult {} (timeout "
+                            "{} ns)",
+                            int(wait_result), kPresentFenceTimeoutNs));
             return false;
           }
           return true;
@@ -881,9 +980,8 @@ void MclaNativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   last_frame_applied_ = 0;
   last_frame_skipped_conv_ = 0;
   last_frame_clears_ = 0;
-  census_.EndFrame();
-  census_.BeginFrame();
-  ++census_frame_count_;
+  // census_.EndFrame()/BeginFrame() now run in the SwapScope guard above, on
+  // every exit path of IssueSwap.
   // The shader pair is deliberately NOT reset: the guest only re-uploads
   // its microcode when it changes, so a second frame may reuse the pair
   // loaded in the first without a new LoadShader call. A reset here would

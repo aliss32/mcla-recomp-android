@@ -174,6 +174,10 @@ public:
   // the GPU thread, so no lock.
   bool enabled() const { return enabled_ && file_ != nullptr; }
 
+  // Byte size of the census file at the last EndFrame flush (0 until the
+  // first flush). The heartbeat reads it to prove the file is growing.
+  uint64_t last_flush_bytes() const;
+
   // Convenience: DrawSample lives in FrameRecord.
   using DrawSample = FrameRecord::DrawSample;
 
@@ -187,6 +191,7 @@ private:
   FrameRecord current_;
   uint64_t next_frame_ = 1;
   bool enabled_ = false;
+  uint64_t last_flush_bytes_ = 0;
   std::filesystem::path path_;
   std::FILE *file_ = nullptr;
 };
