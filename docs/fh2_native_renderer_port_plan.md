@@ -110,3 +110,21 @@ Adapt the FH2-recompiled graphics stack to MCLA and ship it as an APK on a new b
   same magics inside compressed audio blobs (false positives).
 - Deliverable for Faz 3 becomes `mcla_shaders.nfsp` + `contenedores/` directory, built by a new
   `tools/xenos_mcla/` build script mirroring `biblioteca.sh` but reading MCLA archives.
+
+## Faz 3b status (2026-10-16, latest)
+
+- `xarchive_*.rpf` headers parse as RPF3-like ('RPF3' magic 0x33465052, count+dirSize+0xFFFFFFFF),
+  but the TOC at 0x800 onward is AES-encrypted (high-entropy bytes, no plaintext names), and the
+  file payload region likewise. The decryption keys live inside `default.xex` (the game's XArchive
+  reader derives them at runtime).
+- Practical consequence: shader-container extraction needs either
+  (a) the xex's embedded key derivation (extract from the recompiled binary we already run), or
+  (b) running the MCLA PC reference build once and dumping its decrypted XArchive pages, or
+  (c) the FH2 approach: use the running recompiled process itself to hook the game's own archive
+    open/read calls and dump containers to disk (exactly what FH2's `app/src/fh2_*` dump hooks do).
+- Chosen path: (c). A small dump plugin (built on the same plugin mechanism as `mcla-native`)
+  hooks MCLA's archive-open + shader-create functions, writes every 0x102A container to
+  `out/contenedores/*.bin` on first run; then the existing XenosRecomp + empaquetar chain (built
+  with `MCLA_RECOMP` instead of `FH2_RECOMP`) produces `mcla_shaders.nfsp`.
+- This changes Faz 3b/4/5 order: the dump plugin is Faz 4's first commit, then shader build, then
+  the full native renderer.
