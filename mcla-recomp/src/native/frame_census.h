@@ -185,8 +185,9 @@ private:
   FrameCensusWriter(const FrameCensusWriter &) = delete;
   FrameCensusWriter &operator=(const FrameCensusWriter &) = delete;
   void OpenFile();
-  // Census runs on the GPU thread, but Shutdown flushes from any thread.
-  std::mutex mutex_;
+  // Census runs on the GPU thread, but Shutdown flushes from any thread and
+  // last_flush_bytes() is const, so the mutex must be mutable.
+  mutable std::mutex mutex_;
   void RecordSkippedLocked(const std::string &reason);
   FrameRecord current_;
   uint64_t next_frame_ = 1;
