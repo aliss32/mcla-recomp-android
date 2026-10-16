@@ -76,7 +76,7 @@ VkFormat RenderTargetManager::HostColorFormat(uint32_t guest_color_format) {
   case 5: // k_16_16 fixed point -> snorm (SDK parity)
   case 26:
     return VK_FORMAT_R16G16B16A16_SNORM;
-  case 7:  // ColorRenderTargetFormat::k_16_16_16_16_FLOAT
+  case 8: // ColorRenderTargetFormat::k_16_16_16_16_FLOAT
   case 32: // ColorFormat k_16_16_FLOAT
     return VK_FORMAT_R16G16B16A16_SFLOAT;
   case 14: // k_32_FLOAT
@@ -97,7 +97,7 @@ RenderTargetManager::GuestFormatBytesPerPixel(uint32_t guest_color_format) {
   case 7:
     return 4;
   case 5:
-  case 7:
+  case 8:
   case 26:
   case 32:
     return 8;
