@@ -52,6 +52,7 @@ set(REXGPU_MCLA_NATIVE_SOURCES
     src/native/graphics_system.cpp
     src/native/command_processor.cpp
     src/native/frame_census.cpp
+    src/native/heartbeat.cpp
     src/native/render_target_manager.cpp
     src/native/present_pass.cpp
     src/native/frame_dump.cpp
@@ -85,6 +86,11 @@ target_include_directories(rexgpu-mcla-native PRIVATE
 # xxhash.h comes from the vendored xxHash submodule through the xxHash::xxhash
 # target (the same dependency the Xenos plugin links).
 target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime xxHash::xxhash)
+# Heartbeat sidecar + logcat line (stage 0.3). The 'log' lib is Android's
+# liblog for __android_log_print.
+if(ANDROID)
+    target_link_libraries(rexgpu-mcla-native PRIVATE log)
+endif()
 # glslang for the present pass GLSL->SPIR-V (same link set rexgpu-xenos gets,
 # src/graphics/CMakeLists.txt:146-157). A missing target fails the configure
 # step - no silent fallback.

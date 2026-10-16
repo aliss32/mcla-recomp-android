@@ -1,7 +1,9 @@
 // Frame census writer implementation. See frame_census.h.
 #include "frame_census.h"
 
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -107,9 +109,31 @@ void FrameCensusWriter::SetEnabled(bool enabled,
 void FrameCensusWriter::OpenFile() {
   std::error_code error;
   std::filesystem::create_directories(path_.parent_path(), error);
+  if (error) {
+    REXLOG_ERROR("mcla_native census: mkdir {} failed: {} ({})",
+                 path_.parent_path().string(), error.value(),
+                 error.message());
+  }
+  errno = 0;
   file_ = std::fopen(path_.string().c_str(), "wb");
   if (!file_) {
-    REXLOG_ERROR("mcla_native census: cannot open {}", path_.string());
+    // errno is only meaningful immediately after a failed libc call.
+    REXLOG_ERROR("mcla_native census: cannot open {} errno={} ({}); the "
+                 "census is OFF",
+                 path_.string(), errno, std::strerror(errno));
+  } else {
+    // A zero-byte file at open is fine, but prove the path is writable now:
+    // an ferror discovered 200 frames later is useless.
+    const int first = std::fputc('[', file_);
+    std::fflush(file_);
+    if (first == EOF || std::ferror(file_)) {
+      REXLOG_ERROR("mcla_native census: first write to {} failed; the census "
+                   "is OFF",
+                   path_.string());
+      std::fclose(file_);
+      file_ = nullptr;
+      enabled_ = false;
+    }
   }
 }
 
@@ -360,9 +384,26 @@ void FrameCensusWriter::EndFrame() {
         s.color_bases[3]);
   }
   std::fputs("]}\n", file_);
-  // Flush every frame so the census survives a crash mid-run.
+  // Flush every frame so the census survives a crash mid-run. A failed
+  // write/flush is visible from the heartbeat (endframe_bytes stops) instead
+  // of silently dropping frames.
   std::fflush(file_);
+  if (std::ferror(file_)) {
+    REXLOG_ERROR("mcla_native census: write error on frame {}; the file may "
+                 "be full or detached",
+                 r.frame);
+    std::clearerr(file_);
+  }
+  const long bytes = std::ftell(file_);
+  if (bytes >= 0) {
+    last_flush_bytes_ = uint64_t(bytes);
+  }
   ++next_frame_;
+}
+
+uint64_t FrameCensusWriter::last_flush_bytes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return last_flush_bytes_;
 }
 
 void FrameCensusWriter::RecordSkippedLocked(const std::string &reason) {

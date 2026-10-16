@@ -22,6 +22,10 @@
 #include <rex/runtime.h>
 #include <rex/thread.h>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
 REXCVAR_DEFINE_STRING(mcla_audio, "sdl", "MCLA",
                       "Audio output: sdl (falls back to silent if no device), or none");
 
@@ -49,7 +53,19 @@ class SilentAudioDriver : public rex::audio::AudioDriver {
     worker_.join();
   }
 
-  void SubmitFrame(uint32_t /*samples_ptr*/) override { ++pending_; }
+  void SubmitFrame(uint32_t /*samples_ptr*/) override {
+    ++pending_;
+#if defined(__ANDROID__)
+    // Stage 0.3 audio liveness: the guest's audio submits show up in logcat
+    // even when the GPU thread is wedged and the rotating SDK log is dead.
+    // One line per 100 submits keeps the noise bounded (a 48 kHz stream
+    // submits ~46 times a second).
+    if (pending_ % 100 == 0) {
+      __android_log_print(ANDROID_LOG_INFO, "MCLA", "audio_submits=%llu",
+                          (unsigned long long)pending_.load());
+    }
+#endif
+  }
 
  private:
   void Run() {
