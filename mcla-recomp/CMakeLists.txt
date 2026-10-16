@@ -58,10 +58,6 @@ set(REXGPU_MCLA_NATIVE_SOURCES
     # needed translation units are compiled into this target instead.
     # Same list the undefined symbols demanded; add more only when the
     # linker names them.
-    # Stage 2.1 derives from VulkanCommandProcessor, so the full Vulkan
-    # backend source set (and the SPIR-V translator it pulls in) is
-    # compiled here too - the same files rexgpu-xenos compiles
-    # (src/graphics/CMakeLists.txt:7-55).
     ${REXSDK_DIR}/src/graphics/command_processor.cpp
     ${REXSDK_DIR}/src/graphics/graphics_system.cpp
     ${REXSDK_DIR}/src/graphics/registers.cpp
@@ -69,24 +65,6 @@ set(REXGPU_MCLA_NATIVE_SOURCES
     ${REXSDK_DIR}/src/graphics/packet_disassembler.cpp
     ${REXSDK_DIR}/src/graphics/util/draw.cpp
     ${REXSDK_DIR}/src/graphics/util/draw_extent_estimator.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/shader.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/translator.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv_builder.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv_translator.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv_translator_alu.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv_translator_memexport.cpp
-    ${REXSDK_DIR}/src/graphics/pipeline/shader/spirv_translator_rb.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/graphics_system.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/deferred_command_buffer.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/command_processor.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/pipeline_cache.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/primitive_processor.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/render_target_cache.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/shader.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/shared_memory.cpp
-    ${REXSDK_DIR}/src/graphics/vulkan/texture_cache.cpp
 )
 add_library(rexgpu-mcla-native SHARED ${REXGPU_MCLA_NATIVE_SOURCES})
 add_library(rex::gpu-mcla-native ALIAS rexgpu-mcla-native)
@@ -100,25 +78,16 @@ target_include_directories(rexgpu-mcla-native PRIVATE
     ${REXSDK_DIR}
     # renderdoc_app.h: included by the SDK's Vulkan presenter headers.
     ${REXSDK_DIR}/thirdparty/renderdoc
-    ${REXSDK_DIR}/thirdparty/vulkan-headers/include
 )
 # xxhash.h comes from the vendored xxHash submodule through the xxHash::xxhash
 # target (the same dependency the Xenos plugin links).
 target_link_libraries(rexgpu-mcla-native PRIVATE rex::runtime xxHash::xxhash)
-if(TARGET Vulkan::Headers)
-    target_link_libraries(rexgpu-mcla-native PRIVATE Vulkan::Headers)
-endif()
-# GLSL->SPIR-V for the host helper shaders the Vulkan backend compiles
-# (the same link set rexgpu-xenos gets in the SDK's CMakeLists.txt:141-157).
-foreach(_glslang_lib glslang::SPIRV GPUOpen::VulkanMemoryAllocator glslang
-                     MachineIndependent GenericCodeGen OSDependent OGLCompiler)
-    if(TARGET ${_glslang_lib})
-        target_link_libraries(rexgpu-mcla-native PRIVATE ${_glslang_lib})
-    endif()
-endforeach()
 # Show every missing symbol in one link, not one per retry (lld only).
 if(ANDROID)
     target_link_options(rexgpu-mcla-native PRIVATE "-Wl,--error-limit=0")
+endif()
+if(TARGET Vulkan::Headers)
+    target_link_libraries(rexgpu-mcla-native PRIVATE Vulkan::Headers)
 endif()
 if(COMMAND rexglue_apply_target_settings)
     rexglue_apply_target_settings(rexgpu-mcla-native)
